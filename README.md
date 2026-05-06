@@ -131,4 +131,4 @@ sudo .build/release/wechat-antirecall restore \
 
 ## 友链
 
-- [linux.do](https://linux.do) — Linux 中文社区
+- [linux.do](https://linux.do) — 新的理想型社区
