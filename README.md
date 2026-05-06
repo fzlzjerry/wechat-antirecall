@@ -128,3 +128,7 @@ sudo .build/release/wechat-antirecall restore \
 - [sunnyyoung/WeChatTweak](https://github.com/sunnyyoung/WeChatTweak-macOS) — upstream，包含 `Block message recall` 功能
 - [tanranv5/WeChatTweak](https://github.com/tanranv5/WeChatTweak) — 社区 fork，补充较新 x86_64 配置，引入 `binary` 字段
 - [zetaloop/BetterWX](https://github.com/zetaloop/BetterWX) — Windows 版微信 4 的同类提示模式补丁
+
+## 友链
+
+- [linux.do](https://linux.do) — Linux 中文社区
