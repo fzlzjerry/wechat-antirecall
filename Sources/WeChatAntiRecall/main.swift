@@ -790,24 +790,18 @@ extension Data {
     }
 
     func leUInt64(at offset: Int) -> UInt64 {
-        UInt64(self[offset])
-            | (UInt64(self[offset + 1]) << 8)
-            | (UInt64(self[offset + 2]) << 16)
-            | (UInt64(self[offset + 3]) << 24)
-            | (UInt64(self[offset + 4]) << 32)
-            | (UInt64(self[offset + 5]) << 40)
-            | (UInt64(self[offset + 6]) << 48)
-            | (UInt64(self[offset + 7]) << 56)
+        var value: UInt64 = 0
+        for byteIndex in 0..<8 {
+            value |= UInt64(self[offset + byteIndex]) << (byteIndex * 8)
+        }
+        return value
     }
 
     func beUInt64(at offset: Int) -> UInt64 {
-        (UInt64(self[offset]) << 56)
-            | (UInt64(self[offset + 1]) << 48)
-            | (UInt64(self[offset + 2]) << 40)
-            | (UInt64(self[offset + 3]) << 32)
-            | (UInt64(self[offset + 4]) << 24)
-            | (UInt64(self[offset + 5]) << 16)
-            | (UInt64(self[offset + 6]) << 8)
-            | UInt64(self[offset + 7])
+        var value: UInt64 = 0
+        for byteIndex in 0..<8 {
+            value = (value << 8) | UInt64(self[offset + byteIndex])
+        }
+        return value
     }
 }
