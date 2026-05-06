@@ -184,11 +184,10 @@ struct CLI {
         print("Bundle: \(appInfo.bundleIdentifier)")
         print("Executable: \(appInfo.executableURL.path)")
         print("")
-        print("Supported revoke patch versions:")
+        print("Supported patch versions:")
 
         for config in configs {
             let targets = config.targets
-                .filter { $0.identifier == "revoke" || $0.identifier == "revoke-tip" }
                 .map { target in
                     let arches = target.entries.reduce(into: [String]()) { result, entry in
                         let arch = entry.arch.rawValue
@@ -216,16 +215,18 @@ struct CLI {
         let configs = try loadConfigs(path: options.configPath)
         let appInfo = try readAppInfo(appPath: options.appPath)
         let config = try configForInstalledApp(appInfo, configs: configs)
-        let targetIdentifier = options.withTip ? "revoke-tip" : "revoke"
-        let targets = config.targets.filter { $0.identifier == targetIdentifier }
-        var patchedBinaries: [URL] = []
-
-        guard !targets.isEmpty else {
-            throw ToolError.invalidConfig("构建号 \(config.version) 没有 \(targetIdentifier) 目标")
+        let targetIdentifiers = options.targetIdentifiers
+        let targets = try targetIdentifiers.map { identifier in
+            guard let target = config.targets.first(where: { $0.identifier == identifier }) else {
+                throw ToolError.invalidConfig("构建号 \(config.version) 没有 \(identifier) 目标")
+            }
+            return target
         }
+        var patchedBinaries: [URL] = []
+        var backedUpBinaryPaths = Set<String>()
 
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
-        let modeText = options.withTip ? "patch with recall tip" : "patch silent"
+        let modeText = targetIdentifiers.map(displayName(forTargetIdentifier:)).joined(separator: ", ")
         print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
 
         for target in targets {
@@ -235,7 +236,7 @@ struct CLI {
             }
             patchedBinaries.append(binaryURL)
 
-            if !options.dryRun && !options.noBackup {
+            if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(binaryURL.standardizedFileURL.path).inserted {
                 let backupURL = try makeBackup(of: binaryURL)
                 print("Backup: \(backupURL.path)")
             }
@@ -297,7 +298,7 @@ struct CLI {
 
         Usage:
           wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json]
-          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--dry-run] [--no-backup] [--skip-resign]
+          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
           wechat-antirecall restore  --backup <path> [--binary Contents/MacOS/WeChat] [--app /Applications/WeChat.app] [--skip-resign]
 
         Notes:
@@ -330,9 +331,23 @@ struct InstallOptions {
     var appPath = defaultAppPath
     var configPath: String?
     var withTip = false
+    var blockUpdate = false
+    var updateOnly = false
     var dryRun = false
     var noBackup = false
     var skipResign = false
+
+    var targetIdentifiers: [String] {
+        if updateOnly {
+            return ["update"]
+        }
+
+        var identifiers = [withTip ? "revoke-tip" : "revoke"]
+        if blockUpdate {
+            identifiers.append("update")
+        }
+        return identifiers
+    }
 
     init(_ arguments: [String]) throws {
         var parser = ArgumentCursor(arguments)
@@ -344,6 +359,11 @@ struct InstallOptions {
                 configPath = try parser.requiredValue(after: argument)
             case "--with-tip":
                 withTip = true
+            case "--block-update":
+                blockUpdate = true
+            case "--update-only":
+                updateOnly = true
+                blockUpdate = true
             case "--dry-run":
                 dryRun = true
             case "--no-backup":
@@ -354,6 +374,23 @@ struct InstallOptions {
                 throw ToolError.usage("未知参数：\(argument)")
             }
         }
+
+        if updateOnly && withTip {
+            throw ToolError.usage("--update-only 不能与 --with-tip 同时使用")
+        }
+    }
+}
+
+private func displayName(forTargetIdentifier identifier: String) -> String {
+    switch identifier {
+    case "revoke":
+        return "patch silent"
+    case "revoke-tip":
+        return "patch with recall tip"
+    case "update":
+        return "block automatic update"
+    default:
+        return identifier
     }
 }
 

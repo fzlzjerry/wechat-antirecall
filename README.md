@@ -19,6 +19,8 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 
 **提示模式（`--with-tip`）**：不跳过 `revokemsg` 解析，让微信继续读取 `replacemsg` 撤回提示，同时把撤回包里的 `newmsgid` 清零，阻止微信按原消息 SvrID 删除已有消息。效果与 BetterWX/WeChatTweak 的"保留提示、阻断删除"策略一致。
 
+**屏蔽自动更新（`--block-update` / `--update-only`）**：针对微信 4.1.9 的 `XAppUpdateManager`，屏蔽 `startUpdater`、`startBackgroundUpdatesCheck:`、`checkForUpdates:`、`enableAutoUpdate:` 等入口，并让 `automaticallyDownloadsUpdates`、`canCheckForUpdate` 返回 `false`。
+
 ## 用法
 
 **第一步**：查看当前微信版本是否已支持。
@@ -35,6 +37,12 @@ swift run wechat-antirecall install --dry-run --app /Applications/WeChat.app
 
 # 提示模式
 swift run wechat-antirecall install --with-tip --dry-run --app /Applications/WeChat.app
+
+# 只屏蔽自动更新
+swift run wechat-antirecall install --update-only --dry-run --app /Applications/WeChat.app
+
+# 防撤回并屏蔽自动更新
+swift run wechat-antirecall install --with-tip --block-update --dry-run --app /Applications/WeChat.app
 ```
 
 **第三步**：确认无误后安装。
@@ -47,6 +55,12 @@ sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
 
 # 提示模式
 sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app
+
+# 只屏蔽自动更新
+sudo .build/release/wechat-antirecall install --update-only --app /Applications/WeChat.app
+
+# 提示模式防撤回 + 屏蔽自动更新
+sudo .build/release/wechat-antirecall install --with-tip --block-update --app /Applications/WeChat.app
 ```
 
 安装时默认在被 patch 的二进制旁边创建备份，文件名格式：
@@ -62,6 +76,7 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 ```bash
 sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app --no-backup
+sudo .build/release/wechat-antirecall install --update-only --app /Applications/WeChat.app --no-backup
 ```
 
 ### 验证签名
@@ -82,7 +97,7 @@ sudo .build/release/wechat-antirecall restore \
 
 ## 补丁配置格式
 
-`patches.json` 配置来自 WeChatTweak / 社区 fork，只保留防撤回目标。
+`patches.json` 配置来自 WeChatTweak / 社区 fork 的 Mach-O patch 思路，并补充当前微信 4 的防撤回和屏蔽更新目标。
 
 ```json
 {
@@ -105,6 +120,8 @@ sudo .build/release/wechat-antirecall restore \
 ```
 
 `expected` 支持单个十六进制字符串或字符串数组；提示模式会同时接受"原始字节"和"已装过静默补丁的字节"，支持直接在两种模式间切换而无需先恢复备份。
+
+`update` 目标目前只覆盖 `268575`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
 
 ## 参考
 

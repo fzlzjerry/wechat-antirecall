@@ -140,6 +140,66 @@
             "asm": "7FB600F9"
           }
         ]
+      },
+      {
+        "identifier": "update",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "1b22e4",
+            "expected": "FC6FBBA9",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1b440c",
+            "expected": "FFC305D1",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1b46d0",
+            "expected": "FF4301D1",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1b4ab0",
+            "expected": "F657BDA9",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1b6898",
+            "expected": "FFC305D1",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1bb110",
+            "expected": "00604039C0035FD6",
+            "asm": "00008052C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1bb118",
+            "expected": "02600039",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1bb120",
+            "expected": "00644039C0035FD6",
+            "asm": "00008052C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1bb128",
+            "expected": "02640039",
+            "asm": "C0035FD6"
+          }
+        ]
       }
     ]
   }
