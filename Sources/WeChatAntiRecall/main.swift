@@ -23,6 +23,7 @@ enum ToolError: LocalizedError {
     case noMatchingSlice(String)
     case commandFailed(String, Int32)
     case permissionDenied(path: String, operation: String)
+    case fileOperationFailed(operation: String, path: String, underlying: String)
 
     var errorDescription: String? {
         switch self {
@@ -52,9 +53,15 @@ enum ToolError: LocalizedError {
         case .permissionDenied(let path, let operation):
             return """
             没有权限\(operation)：\(path)
-            安装到 /Applications/WeChat.app 通常需要管理员权限。请先构建 release 版本，再用 sudo 运行安装或恢复命令，例如：
+            当前有效用户 ID：\(geteuid())。安装到 /Applications/WeChat.app 通常需要管理员权限。请先构建 release 版本，再用 sudo 运行安装或恢复命令，例如：
               swift build -c release
               sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app
+            """
+        case .fileOperationFailed(let operation, let path, let underlying):
+            return """
+            \(operation)失败：\(path)
+            底层错误：\(underlying)
+            当前有效用户 ID：\(geteuid())。如果目标是 /Applications/WeChat.app，请确认使用的是 release 产物并通过 sudo 运行。
             """
         }
     }
@@ -674,12 +681,12 @@ private func validateInstallPermissions(appInfo: AppInfo, targets: [PatchTarget]
         try requireWritable(binaryURL, operation: "修改目标二进制")
 
         if !options.noBackup {
-            try requireWritable(binaryURL.deletingLastPathComponent(), operation: "在目标目录创建备份")
+            try requireDirectoryWritable(binaryURL.deletingLastPathComponent(), operation: "在目标目录创建备份")
         }
     }
 
     if !options.skipResign {
-        try requireWritable(appInfo.appURL, operation: "重签名 WeChat.app")
+        try requireDirectoryWritable(appInfo.appURL, operation: "重签名 WeChat.app")
     }
 }
 
@@ -687,13 +694,30 @@ private func validateRestorePermissions(appInfo: AppInfo, binaryURL: URL, skipRe
     try requireWritable(binaryURL, operation: "恢复目标二进制")
 
     if !skipResign {
-        try requireWritable(appInfo.appURL, operation: "重签名 WeChat.app")
+        try requireDirectoryWritable(appInfo.appURL, operation: "重签名 WeChat.app")
     }
 }
 
 private func requireWritable(_ url: URL, operation: String) throws {
     if access(url.path, W_OK) != 0 {
         throw ToolError.permissionDenied(path: url.path, operation: operation)
+    }
+}
+
+private func requireDirectoryWritable(_ url: URL, operation: String) throws {
+    try requireWritable(url, operation: operation)
+
+    let probeURL = url.appendingPathComponent(".wechat-antirecall-write-test-\(UUID().uuidString)")
+    do {
+        try Data().write(to: probeURL, options: .withoutOverwriting)
+        try FileManager.default.removeItem(at: probeURL)
+    } catch {
+        try? FileManager.default.removeItem(at: probeURL)
+        throw ToolError.fileOperationFailed(
+            operation: operation,
+            path: url.path,
+            underlying: error.localizedDescription
+        )
     }
 }
 
@@ -705,7 +729,17 @@ private func makeBackup(of fileURL: URL) throws -> URL {
         .deletingLastPathComponent()
         .appendingPathComponent("\(fileURL.lastPathComponent).wechat-antirecall-backup-\(suffix)")
 
-    try FileManager.default.copyItem(at: fileURL, to: backupURL)
+    do {
+        let data = try Data(contentsOf: fileURL)
+        try data.write(to: backupURL, options: .withoutOverwriting)
+    } catch {
+        throw ToolError.fileOperationFailed(
+            operation: "创建备份",
+            path: backupURL.path,
+            underlying: error.localizedDescription
+        )
+    }
+
     return backupURL
 }
 

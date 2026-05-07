@@ -71,6 +71,12 @@ error: "wechat.dylib" couldn't be copied because you don't have permission to ac
 
 说明当前命令没有权限在 `/Applications/WeChat.app/Contents/Resources` 里创建备份/写入补丁。请不要用 `swift run ... install` 直接安装，先 `swift build -c release`，再使用上面的 `sudo .build/release/wechat-antirecall ...` 命令。`--no-backup` 不能解决这个权限问题，后续 patch 和重签名仍然需要写入 app bundle。
 
+如果已经使用 `sudo .build/release/...` 仍然看到这条英文错误，通常是在运行旧版工具；旧实现使用 `FileManager.copyItem` 在 `Resources` 内复制备份，部分环境会在这里直接抛出 Cocoa 权限错误。请拉取/构建新版后重试。新版会先做真实写入探针，并在失败时输出当前有效用户 ID。也可以先用下面命令确认 sudo 是否真的能写入目标目录：
+
+```bash
+sudo sh -c 'id -u; touch /Applications/WeChat.app/Contents/Resources/.wechat-antirecall-write-test && rm /Applications/WeChat.app/Contents/Resources/.wechat-antirecall-write-test'
+```
+
 安装时默认在被 patch 的二进制旁边创建备份，文件名格式：
 
 ```
