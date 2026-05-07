@@ -77,6 +77,8 @@ error: "wechat.dylib" couldn't be copied because you don't have permission to ac
 sudo sh -c 'id -u; touch /Applications/WeChat.app/Contents/Resources/.wechat-antirecall-write-test && rm /Applications/WeChat.app/Contents/Resources/.wechat-antirecall-write-test'
 ```
 
+如果上面的命令第一行输出 `0`，但 `touch` 仍然报 `Operation not permitted`，说明 `sudo` 已生效，写入被 macOS 隐私权限拦截。到 **System Settings → Privacy & Security → App Management** 中给当前运行命令的应用开启权限，例如 Terminal、iTerm、VS Code、Cursor 或 Codex；必要时也在 **Full Disk Access** 中开启同一个应用。改完后退出并重新打开终端，再重新运行 release 安装命令。
+
 安装时默认在被 patch 的二进制旁边创建备份，文件名格式：
 
 ```

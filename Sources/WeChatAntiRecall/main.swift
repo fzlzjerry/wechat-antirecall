@@ -61,7 +61,7 @@ enum ToolError: LocalizedError {
             return """
             \(operation)失败：\(path)
             底层错误：\(underlying)
-            当前有效用户 ID：\(geteuid())。如果目标是 /Applications/WeChat.app，请确认使用的是 release 产物并通过 sudo 运行。
+            当前有效用户 ID：\(geteuid())。如果已经通过 sudo 运行但底层错误是 Operation not permitted，请在 macOS 系统设置的 Privacy & Security 中给当前终端应用开启 App Management，必要时同时开启 Full Disk Access，然后退出并重新打开终端再试。
             """
         }
     }
