@@ -63,6 +63,14 @@ sudo .build/release/wechat-antirecall install --update-only --app /Applications/
 sudo .build/release/wechat-antirecall install --with-tip --block-update --app /Applications/WeChat.app
 ```
 
+如果看到类似：
+
+```
+error: "wechat.dylib" couldn't be copied because you don't have permission to access "Resources".
+```
+
+说明当前命令没有权限在 `/Applications/WeChat.app/Contents/Resources` 里创建备份/写入补丁。请不要用 `swift run ... install` 直接安装，先 `swift build -c release`，再使用上面的 `sudo .build/release/wechat-antirecall ...` 命令。`--no-backup` 不能解决这个权限问题，后续 patch 和重签名仍然需要写入 app bundle。
+
 安装时默认在被 patch 的二进制旁边创建备份，文件名格式：
 
 ```

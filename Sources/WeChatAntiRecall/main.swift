@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 private let defaultAppPath = "/Applications/WeChat.app"
 private let defaultBinaryPath = "Contents/MacOS/WeChat"
@@ -21,6 +22,7 @@ enum ToolError: LocalizedError {
     case bytesMismatch(address: UInt64, expected: [Data], actual: Data)
     case noMatchingSlice(String)
     case commandFailed(String, Int32)
+    case permissionDenied(path: String, operation: String)
 
     var errorDescription: String? {
         switch self {
@@ -47,6 +49,13 @@ enum ToolError: LocalizedError {
             return "\(path) 中没有找到配置要求的架构切片"
         case .commandFailed(let command, let status):
             return "\(command) 执行失败，退出码 \(status)"
+        case .permissionDenied(let path, let operation):
+            return """
+            没有权限\(operation)：\(path)
+            安装到 /Applications/WeChat.app 通常需要管理员权限。请先构建 release 版本，再用 sudo 运行安装或恢复命令，例如：
+              swift build -c release
+              sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app
+            """
         }
     }
 }
@@ -228,6 +237,7 @@ struct CLI {
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
         let modeText = targetIdentifiers.map(displayName(forTargetIdentifier:)).joined(separator: ", ")
         print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
+        try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options)
 
         for target in targets {
             let binaryURL = appInfo.appURL.appendingPathComponent(target.binaryPath)
@@ -281,6 +291,7 @@ struct CLI {
         }
 
         let data = try Data(contentsOf: backupURL)
+        try validateRestorePermissions(appInfo: appInfo, binaryURL: binaryURL, skipResign: options.skipResign)
         try data.write(to: binaryURL, options: .atomic)
         print("Restored \(options.binaryPath) from \(backupURL.path)")
 
@@ -647,6 +658,43 @@ private func configForInstalledApp(_ appInfo: AppInfo, configs: [VersionConfig])
         return config
     }
     throw ToolError.unsupportedVersion(found: appInfo.buildVersion, supported: configs.map(\.version))
+}
+
+private func validateInstallPermissions(appInfo: AppInfo, targets: [PatchTarget], options: InstallOptions) throws {
+    guard !options.dryRun else {
+        return
+    }
+
+    for target in targets {
+        let binaryURL = appInfo.appURL.appendingPathComponent(target.binaryPath)
+        guard FileManager.default.fileExists(atPath: binaryURL.path) else {
+            continue
+        }
+
+        try requireWritable(binaryURL, operation: "修改目标二进制")
+
+        if !options.noBackup {
+            try requireWritable(binaryURL.deletingLastPathComponent(), operation: "在目标目录创建备份")
+        }
+    }
+
+    if !options.skipResign {
+        try requireWritable(appInfo.appURL, operation: "重签名 WeChat.app")
+    }
+}
+
+private func validateRestorePermissions(appInfo: AppInfo, binaryURL: URL, skipResign: Bool) throws {
+    try requireWritable(binaryURL, operation: "恢复目标二进制")
+
+    if !skipResign {
+        try requireWritable(appInfo.appURL, operation: "重签名 WeChat.app")
+    }
+}
+
+private func requireWritable(_ url: URL, operation: String) throws {
+    if access(url.path, W_OK) != 0 {
+        throw ToolError.permissionDenied(path: url.path, operation: operation)
+    }
 }
 
 private func makeBackup(of fileURL: URL) throws -> URL {
