@@ -18,7 +18,7 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 
 > **268575 / 268596（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
 
-> **268575（微信 4.1.9）** 的 `revoke/revoke-tip/update` 目标在 `wechat.dylib`，`multiInstance` 目标在主二进制 `Contents/MacOS/WeChat`。签名方式同上
+> **268575（微信 4.1.9）** 的 `multiInstance` 目标在主二进制 `Contents/MacOS/WeChat`。签名方式同上
 
 ## 补丁模式
 
