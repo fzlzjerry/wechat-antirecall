@@ -47,6 +47,8 @@ swift run wechat-antirecall install --with-tip --block-update --dry-run --app /A
 
 **第三步**：确认无误后安装。
 
+安装前请先完全退出微信。不要在微信仍运行时写入补丁；否则已启动的进程可能在执行到被修改过的代码页时被 macOS 以 `Code Signature Invalid` 终止。
+
 ```bash
 swift build -c release
 
@@ -78,6 +80,8 @@ sudo sh -c 'id -u; touch /Applications/WeChat.app/Contents/Resources/.wechat-ant
 ```
 
 如果上面的命令第一行输出 `0`，但 `touch` 仍然报 `Operation not permitted`，说明 `sudo` 已生效，写入被 macOS 隐私权限拦截。到 **System Settings → Privacy & Security → App Management** 中给当前运行命令的应用开启权限，例如 Terminal、iTerm、VS Code、Cursor 或 Codex；必要时也在 **Full Disk Access** 中开启同一个应用。改完后退出并重新打开终端，再重新运行 release 安装命令。
+
+如果工具提示 `WeChat 仍在运行`，请先退出微信后再安装或恢复。这个检查会阻止在运行中的 app bundle 上打补丁，避免旧进程因为代码签名页校验失败而崩溃。
 
 安装时默认在被 patch 的二进制旁边创建备份，文件名格式：
 
