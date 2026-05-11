@@ -9,9 +9,9 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 | 31927, 31960, 32281, 32288, 34371 | arm64 | `Contents/MacOS/WeChat` |
 | 34817 | x86_64 | `Contents/MacOS/WeChat` |
 | 36559 | x86_64 | `Contents/Frameworks/wechat.dylib` |
-| 268575 | arm64 | `Contents/Resources/wechat.dylib` |
+| 268575, 268596 | arm64 | `Contents/Resources/wechat.dylib` |
 
-> **268575（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
+> **268575 / 268596（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
 
 ## 补丁模式
 
@@ -137,7 +137,7 @@ sudo .build/release/wechat-antirecall restore \
 
 `expected` 支持单个十六进制字符串或字符串数组；提示模式会同时接受"原始字节"和"已装过静默补丁的字节"，支持直接在两种模式间切换而无需先恢复备份。
 
-`update` 目标目前只覆盖 `268575`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
+`update` 目标目前覆盖 `268575` / `268596`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
 
 ## 参考
 
