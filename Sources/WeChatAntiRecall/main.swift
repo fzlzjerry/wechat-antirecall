@@ -231,18 +231,13 @@ struct CLI {
         let configs = try loadConfigs(path: options.configPath)
         let appInfo = try readAppInfo(appPath: options.appPath)
         let config = try configForInstalledApp(appInfo, configs: configs)
-        let targetIdentifiers = options.targetIdentifiers
-        let targets = try targetIdentifiers.map { identifier in
-            guard let target = config.targets.first(where: { $0.identifier == identifier }) else {
-                throw ToolError.invalidConfig("构建号 \(config.version) 没有 \(identifier) 目标")
-            }
-            return target
-        }
+        let selectedTargets = try resolveTargets(config: config, options: options)
+        let targets = selectedTargets.map(\.target)
         var patchedBinaries: [URL] = []
         var backedUpBinaryPaths = Set<String>()
 
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
-        let modeText = targetIdentifiers.map(displayName(forTargetIdentifier:)).joined(separator: ", ")
+        let modeText = selectedTargets.map { displayName(forTargetIdentifier: $0.identifier) }.joined(separator: ", ")
         print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
         try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options)
 
@@ -287,6 +282,51 @@ struct CLI {
         }
     }
 
+    private func resolveTargets(config: VersionConfig, options: InstallOptions) throws -> [(identifier: String, target: PatchTarget)] {
+        var selected: [(identifier: String, target: PatchTarget)] = []
+
+        if options.updateOnly {
+            guard let updateTarget = config.targets.first(where: { $0.identifier == "update" }) else {
+                throw ToolError.invalidConfig("构建号 \(config.version) 没有 update 目标")
+            }
+            selected.append(("update", updateTarget))
+            return selected
+        }
+
+        if options.withTip, let revokeTipTarget = config.targets.first(where: { $0.identifier == "revoke-tip" }) {
+            selected.append(("revoke-tip", revokeTipTarget))
+        } else if let revokeTarget = config.targets.first(where: { $0.identifier == "revoke" }) {
+            if options.withTip {
+                print("Warning: 构建号 \(config.version) 没有 revoke-tip 目标，已回退为 revoke（静默模式）。")
+            }
+            selected.append(("revoke", revokeTarget))
+        } else {
+            let missing = options.withTip ? "revoke-tip/revoke" : "revoke"
+            throw ToolError.invalidConfig("构建号 \(config.version) 没有 \(missing) 目标")
+        }
+
+        if options.multiInstance {
+            guard let multiTarget = config.targets.first(where: { $0.identifier == "multiInstance" }) else {
+                throw ToolError.invalidConfig("构建号 \(config.version) 没有 multiInstance 目标")
+            }
+            selected.append(("multiInstance", multiTarget))
+
+            if let multiExtraTarget = config.targets.first(where: { $0.identifier == "multiInstance-extra" }) {
+                selected.append(("multiInstance-extra", multiExtraTarget))
+            }
+        }
+
+        if options.blockUpdate {
+            if let updateTarget = config.targets.first(where: { $0.identifier == "update" }) {
+                selected.append(("update", updateTarget))
+            } else {
+                print("Warning: 构建号 \(config.version) 没有 update 目标，已跳过屏蔽自动更新。")
+            }
+        }
+
+        return selected
+    }
+
     private func restore(_ arguments: [String]) throws {
         let options = try RestoreOptions(arguments)
         let appInfo = try readAppInfo(appPath: options.appPath)
@@ -316,7 +356,7 @@ struct CLI {
 
         Usage:
           wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json]
-          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
+          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
           wechat-antirecall restore  --backup <path> [--binary Contents/MacOS/WeChat] [--app /Applications/WeChat.app] [--skip-resign]
 
         Notes:
@@ -349,6 +389,7 @@ struct InstallOptions {
     var appPath = defaultAppPath
     var configPath: String?
     var withTip = false
+    var multiInstance = false
     var blockUpdate = false
     var updateOnly = false
     var dryRun = false
@@ -361,6 +402,9 @@ struct InstallOptions {
         }
 
         var identifiers = [withTip ? "revoke-tip" : "revoke"]
+        if multiInstance {
+            identifiers.append("multiInstance")
+        }
         if blockUpdate {
             identifiers.append("update")
         }
@@ -377,6 +421,8 @@ struct InstallOptions {
                 configPath = try parser.requiredValue(after: argument)
             case "--with-tip":
                 withTip = true
+            case "--multi-instance":
+                multiInstance = true
             case "--block-update":
                 blockUpdate = true
             case "--update-only":
@@ -396,6 +442,9 @@ struct InstallOptions {
         if updateOnly && withTip {
             throw ToolError.usage("--update-only 不能与 --with-tip 同时使用")
         }
+        if updateOnly && multiInstance {
+            throw ToolError.usage("--update-only 不能与 --multi-instance 同时使用")
+        }
     }
 }
 
@@ -407,6 +456,10 @@ private func displayName(forTargetIdentifier identifier: String) -> String {
         return "patch with recall tip"
     case "update":
         return "block automatic update"
+    case "multiInstance":
+        return "enable multi-instance"
+    case "multiInstance-extra":
+        return "enable multi-instance (extra)"
     default:
         return identifier
     }
