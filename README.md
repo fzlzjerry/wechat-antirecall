@@ -9,9 +9,9 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 | 31927, 31960, 32281, 32288, 34371 | arm64 | `Contents/MacOS/WeChat` |
 | 34817 | x86_64 | `Contents/MacOS/WeChat` |
 | 36559 | x86_64 | `Contents/Frameworks/wechat.dylib` |
-| 268575, 268596 | arm64 | `Contents/Resources/wechat.dylib` |
+| 268575 | arm64 | `Contents/Resources/wechat.dylib` |
 
-> **268575 / 268596（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
+> **268575（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
 
 ## 补丁模式
 
@@ -47,8 +47,6 @@ swift run wechat-antirecall install --with-tip --block-update --dry-run --app /A
 
 **第三步**：确认无误后安装。
 
-安装前请先完全退出微信。不要在微信仍运行时写入补丁；否则已启动的进程可能在执行到被修改过的代码页时被 macOS 以 `Code Signature Invalid` 终止。
-
 ```bash
 swift build -c release
 
@@ -80,8 +78,6 @@ sudo sh -c 'id -u; touch /Applications/WeChat.app/Contents/Resources/.wechat-ant
 ```
 
 如果上面的命令第一行输出 `0`，但 `touch` 仍然报 `Operation not permitted`，说明 `sudo` 已生效，写入被 macOS 隐私权限拦截。到 **System Settings → Privacy & Security → App Management** 中给当前运行命令的应用开启权限，例如 Terminal、iTerm、VS Code、Cursor 或 Codex；必要时也在 **Full Disk Access** 中开启同一个应用。改完后退出并重新打开终端，再重新运行 release 安装命令。
-
-如果工具提示 `WeChat 仍在运行`，请先退出微信后再安装或恢复。这个检查会阻止在运行中的 app bundle 上打补丁，避免旧进程因为代码签名页校验失败而崩溃。
 
 安装时默认在被 patch 的二进制旁边创建备份，文件名格式：
 
@@ -141,7 +137,7 @@ sudo .build/release/wechat-antirecall restore \
 
 `expected` 支持单个十六进制字符串或字符串数组；提示模式会同时接受"原始字节"和"已装过静默补丁的字节"，支持直接在两种模式间切换而无需先恢复备份。
 
-`update` 目标目前覆盖 `268575` / `268596`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
+`update` 目标目前只覆盖 `268575`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
 
 ## 参考
 

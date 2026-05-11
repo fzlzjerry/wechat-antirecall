@@ -24,7 +24,6 @@ enum ToolError: LocalizedError {
     case commandFailed(String, Int32)
     case permissionDenied(path: String, operation: String)
     case fileOperationFailed(operation: String, path: String, underlying: String)
-    case appIsRunning(path: String, pids: [String])
 
     var errorDescription: String? {
         switch self {
@@ -63,12 +62,6 @@ enum ToolError: LocalizedError {
             \(operation)失败：\(path)
             底层错误：\(underlying)
             当前有效用户 ID：\(geteuid())。如果已经通过 sudo 运行但底层错误是 Operation not permitted，请在 macOS 系统设置的 Privacy & Security 中给当前终端应用开启 App Management，必要时同时开启 Full Disk Access，然后退出并重新打开终端再试。
-            """
-        case .appIsRunning(let path, let pids):
-            return """
-            WeChat 仍在运行，不能在运行中修改或恢复 app bundle：\(path)
-            正在运行的进程 PID：\(pids.joined(separator: ", "))
-            请先完全退出微信，再重新运行命令。运行中修改二进制可能触发 macOS Code Signature Invalid 崩溃。
             """
         }
     }
@@ -251,7 +244,6 @@ struct CLI {
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
         let modeText = targetIdentifiers.map(displayName(forTargetIdentifier:)).joined(separator: ", ")
         print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
-        try ensureAppNotRunning(appInfo: appInfo, dryRun: options.dryRun)
         try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options)
 
         for target in targets {
@@ -305,7 +297,6 @@ struct CLI {
             throw ToolError.usage("备份文件不存在：\(backupURL.path)")
         }
 
-        try ensureAppNotRunning(appInfo: appInfo, dryRun: false)
         let data = try Data(contentsOf: backupURL)
         try validateRestorePermissions(appInfo: appInfo, binaryURL: binaryURL, skipResign: options.skipResign)
         try data.write(to: binaryURL, options: .atomic)
@@ -704,47 +695,6 @@ private func validateRestorePermissions(appInfo: AppInfo, binaryURL: URL, skipRe
 
     if !skipResign {
         try requireDirectoryWritable(appInfo.appURL, operation: "重签名 WeChat.app")
-    }
-}
-
-private func ensureAppNotRunning(appInfo: AppInfo, dryRun: Bool) throws {
-    guard !dryRun else {
-        return
-    }
-
-    let appPath = appInfo.appURL.standardizedFileURL.path
-    let appPrefix = appPath.hasSuffix("/") ? appPath : "\(appPath)/"
-    let process = Process()
-    let pipe = Pipe()
-    process.executableURL = URL(fileURLWithPath: "/bin/ps")
-    process.arguments = ["-axo", "pid=,comm="]
-    process.standardOutput = pipe
-    process.standardError = Pipe()
-
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-        throw ToolError.commandFailed("/bin/ps -axo pid=,comm=", process.terminationStatus)
-    }
-
-    let output = pipe.fileHandleForReading.readDataToEndOfFile()
-    let text = String(data: output, encoding: .utf8) ?? ""
-    let runningPIDs = text.split(separator: "\n").compactMap { line -> String? in
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard let separator = trimmed.firstIndex(where: { $0 == " " || $0 == "\t" }) else {
-            return nil
-        }
-
-        let pid = String(trimmed[..<separator])
-        let command = String(trimmed[separator...]).trimmingCharacters(in: .whitespaces)
-        if command == appPath || command.hasPrefix(appPrefix) {
-            return pid
-        }
-        return nil
-    }
-
-    if !runningPIDs.isEmpty {
-        throw ToolError.appIsRunning(path: appInfo.appURL.path, pids: runningPIDs)
     }
 }
 
