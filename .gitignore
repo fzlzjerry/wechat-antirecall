@@ -1,4 +1,5 @@
 .build/
+.swiftpm/xcode/
 .DS_Store
 .codex/
 .vscode/

@@ -301,16 +301,15 @@ struct CLI {
             return selected
         }
 
-        if options.withTip, let revokeTipTarget = config.targets.first(where: { $0.identifier == "revoke-tip" }) {
+        if options.withTip {
+            guard let revokeTipTarget = config.targets.first(where: { $0.identifier == "revoke-tip" }) else {
+                throw ToolError.invalidConfig("构建号 \(config.version) 没有 revoke-tip 目标")
+            }
             selected.append(("revoke-tip", revokeTipTarget))
         } else if let revokeTarget = config.targets.first(where: { $0.identifier == "revoke" }) {
-            if options.withTip {
-                print("Warning: 构建号 \(config.version) 没有 revoke-tip 目标，已回退为 revoke（静默模式）。")
-            }
             selected.append(("revoke", revokeTarget))
         } else {
-            let missing = options.withTip ? "revoke-tip/revoke" : "revoke"
-            throw ToolError.invalidConfig("构建号 \(config.version) 没有 \(missing) 目标")
+            throw ToolError.invalidConfig("构建号 \(config.version) 没有 revoke 目标")
         }
 
         if options.multiInstance {
@@ -325,11 +324,10 @@ struct CLI {
         }
 
         if options.blockUpdate {
-            if let updateTarget = config.targets.first(where: { $0.identifier == "update" }) {
-                selected.append(("update", updateTarget))
-            } else {
-                print("Warning: 构建号 \(config.version) 没有 update 目标，已跳过屏蔽自动更新。")
+            guard let updateTarget = config.targets.first(where: { $0.identifier == "update" }) else {
+                throw ToolError.invalidConfig("构建号 \(config.version) 没有 update 目标")
             }
+            selected.append(("update", updateTarget))
         }
 
         return selected

@@ -159,9 +159,11 @@ sudo .build/release/wechat-antirecall restore \
 
 `expected` 支持单个十六进制字符串或字符串数组；提示模式会同时接受"原始字节"和"已装过静默补丁的字节"，支持直接在两种模式间切换而无需先恢复备份。
 
-`multiInstance`  目标目前只覆盖 `268575`（微信 4.1.9）； `multiInstance` 当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。
+`multiInstance` 目标目前只覆盖 `268575`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。
 
 `update` 目标目前覆盖 `268575` / `268596`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
+
+显式请求 `--with-tip` 或 `--block-update` 时，当前构建号必须提供对应的 `revoke-tip` 或 `update` 目标；工具会拒绝静默降级成其他模式。
 
 ## 参考
 
