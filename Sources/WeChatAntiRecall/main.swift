@@ -246,7 +246,9 @@ struct CLI {
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
         let modeText = selectedTargets.map { displayName(forTargetIdentifier: $0.identifier) }.joined(separator: ", ")
         print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
+        print("Checking whether WeChat is running...")
         try ensureAppNotRunning(appInfo: appInfo, dryRun: options.dryRun)
+        print("Checking install permissions...")
         try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options)
 
         for target in targets {
@@ -257,6 +259,7 @@ struct CLI {
             patchedBinaries.append(binaryURL)
 
             if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(binaryURL.standardizedFileURL.path).inserted {
+                print("Creating backup for \(target.binaryPath)...")
                 let backupURL = try makeBackup(of: binaryURL)
                 print("Backup: \(backupURL.path)")
             }
