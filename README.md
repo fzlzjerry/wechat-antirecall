@@ -67,20 +67,25 @@ swift run wechat-antirecall install --with-tip --block-update --multi-instance -
 
 **可选步骤**：配置自定义撤回提示短语。
 
-短语最长 120 个字符，不能包含换行。`{from}` 会在运行时替换成发送者备注或昵称。未配置时默认显示 `已拦截一条撤回消息`。
+短语最长 120 个字符，不能包含换行。`{from}` 会在运行时替换成发送者备注或昵称，`{time}` 会替换成撤回时间（`HH:mm`）。runtime 会优先使用撤回 XML 里的时间字段；如果没有可用字段，则固定为首次拦截到同一撤回事件时的本地时间，不会跟随系统时钟刷新。未配置时默认显示 `已拦截一条撤回消息`。
 
 ```bash
 # 查看当前短语
 swift run wechat-antirecall tip-phrase get
 
 # 预览短语效果，不写入配置
-swift run wechat-antirecall tip-phrase preview "已拦截 {from} 撤回的一条消息" --from 张三
+swift run wechat-antirecall tip-phrase preview "已拦截 {from} 于 {time} 撤回的一条消息" --from 张三
 
 # 写入 WeChat 容器偏好配置。不要用 sudo 执行。
-swift run wechat-antirecall tip-phrase set "已拦截 {from} 撤回的一条消息"
+swift run wechat-antirecall tip-phrase set "已拦截 {from} 于 {time} 撤回的一条消息"
 
 # 恢复默认短语
 swift run wechat-antirecall tip-phrase reset
+
+# 查看 / 开启 / 关闭撤回调试探针。默认关闭。
+swift run wechat-antirecall tip-phrase probe get
+swift run wechat-antirecall tip-phrase probe on
+swift run wechat-antirecall tip-phrase probe off
 ```
 
 配置位置：
@@ -90,6 +95,8 @@ swift run wechat-antirecall tip-phrase reset
 ```
 
 修改短语后请完全退出并重新打开微信。已启动的 WeChat 进程可能持有旧的偏好缓存，重启后 runtime 会重新读取容器 plist。
+
+`probe on` 会把撤回事件的 `msgType`、`newmsgid`、撤回提示和 XML 片段写入 macOS Console，用于继续分析是否能关联原消息正文。日志可能包含聊天相关元数据，收集完请用 `probe off` 关闭。
 
 自定义短语要实际显示在聊天里，还需要安装运行时 hook。运行时 dylib 不会由普通 `swift run` 自动放到 release 目录，先构建 release，再做 dry-run：
 

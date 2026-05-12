@@ -56,7 +56,7 @@ final class RecallTipPhraseTests: XCTestCase {
     func testParsesPreviewCommandWithSender() throws {
         let options = try RecallTipPhraseOptions([
             "preview",
-            "已拦截 {from} 撤回",
+            "已拦截 {from} 于 {time} 撤回",
             "--from",
             "张三",
             "--type",
@@ -68,12 +68,18 @@ final class RecallTipPhraseTests: XCTestCase {
         XCTAssertEqual(
             options.action,
             .preview(
-                phrase: try RecallTipPhrase("已拦截 {from} 撤回"),
+                phrase: try RecallTipPhrase("已拦截 {from} 于 {time} 撤回"),
                 senderName: "张三",
                 messageKind: "文本消息",
                 messageText: "这是一条示例消息"
             )
         )
+    }
+
+    func testParsesProbeCommands() throws {
+        XCTAssertEqual(try RecallTipPhraseOptions(["probe", "get"]).action, .probe(.get))
+        XCTAssertEqual(try RecallTipPhraseOptions(["probe", "on"]).action, .probe(.set(true)))
+        XCTAssertEqual(try RecallTipPhraseOptions(["probe", "off"]).action, .probe(.set(false)))
     }
 
     func testRuntimeTipInstallOptionSelectsRecallTipPatch() throws {
@@ -124,6 +130,30 @@ final class RecallTipPhraseTests: XCTestCase {
             PropertyListSerialization.propertyList(from: resetData, options: [], format: nil) as? [String: Any]
         )
         XCTAssertNil(resetPlist[RecallTipPreferenceStore.key])
+    }
+
+    func testPreferenceStoreWritesProbeFlag() throws {
+        let homeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: homeDirectory)
+        }
+
+        let store = RecallTipPreferenceStore(homeDirectory: homeDirectory)
+
+        XCTAssertFalse(try store.isProbeEnabled())
+
+        try store.setProbeEnabled(true)
+        XCTAssertTrue(try store.isProbeEnabled())
+
+        let data = try Data(contentsOf: store.preferenceFileURL)
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+        )
+        XCTAssertEqual(plist[RecallTipPreferenceStore.probeKey] as? Bool, true)
+
+        try store.setProbeEnabled(false)
+        XCTAssertFalse(try store.isProbeEnabled())
     }
 
     func testPreferenceResetDoesNotCreateMissingPlist() throws {

@@ -8,9 +8,71 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(rendered, "已拦截 张三 撤回的一条消息")
     }
 
+    func testRendersConfiguredPhraseWithTimePlaceholder() throws {
+        let rendered = try render(original: "张三撤回了一条消息", phrase: "已拦截 {from} 于 {time} 撤回的一条消息")
+
+        XCTAssertNotNil(
+            rendered.range(
+                of: #"^已拦截 张三 于 \d{2}:\d{2} 撤回的一条消息$"#,
+                options: .regularExpression
+            )
+        )
+    }
+
+    func testReusesFirstFallbackTimeForSameRevokeEvent() throws {
+        wechat_antirecall_clear_revoke_tip_time_cache()
+        defer {
+            wechat_antirecall_clear_revoke_tip_time_cache()
+        }
+
+        let phrase = "已拦截 {from} 于 {time} 撤回的一条消息"
+        let first = try renderEvent(
+            original: "Benjamin撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 42,
+            xml: nil,
+            fallbackTime: "00:42"
+        )
+        let second = try renderEvent(
+            original: "Benjamin撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 42,
+            xml: nil,
+            fallbackTime: "00:43"
+        )
+
+        XCTAssertEqual(first, "已拦截 Benjamin 于 00:42 撤回的一条消息")
+        XCTAssertEqual(second, "已拦截 Benjamin 于 00:42 撤回的一条消息")
+    }
+
+    func testUsesIndependentFallbackTimeForDifferentRevokeEvents() throws {
+        wechat_antirecall_clear_revoke_tip_time_cache()
+        defer {
+            wechat_antirecall_clear_revoke_tip_time_cache()
+        }
+
+        let phrase = "已拦截 {from} 于 {time} 撤回的一条消息"
+
+        XCTAssertEqual(
+            try renderEvent(original: "Benjamin撤回了一条消息", phrase: phrase, newMsgId: 42, xml: nil, fallbackTime: "00:42"),
+            "已拦截 Benjamin 于 00:42 撤回的一条消息"
+        )
+        XCTAssertEqual(
+            try renderEvent(original: "Aida撤回了一条消息", phrase: phrase, newMsgId: 43, xml: nil, fallbackTime: "00:43"),
+            "已拦截 Aida 于 00:43 撤回的一条消息"
+        )
+    }
+
     func testRenderingConfiguredPhraseIsIdempotent() throws {
         let phrase = "已拦截 {from} 撤回的一条消息"
         let rendered = try render(original: "Benjamin撤回了一条消息", phrase: phrase)
+
+        XCTAssertEqual(try render(original: rendered, phrase: phrase), rendered)
+    }
+
+    func testRenderingConfiguredPhraseWithTimeIsIdempotent() throws {
+        let phrase = "已拦截 {from} 于 {time} 撤回的一条消息"
+        let rendered = "已拦截 Benjamin 于 00:47 撤回的一条消息"
 
         XCTAssertEqual(try render(original: rendered, phrase: phrase), rendered)
     }
@@ -88,6 +150,29 @@ final class RuntimeRewriteTests: XCTestCase {
 
     private func render(original: String, phrase: String) throws -> String {
         let pointer = wechat_antirecall_render_revoke_tip_copy(original, phrase)
+        let unwrapped = try XCTUnwrap(pointer)
+        defer {
+            wechat_antirecall_free(unwrapped)
+        }
+        return String(cString: unwrapped)
+    }
+
+    private func renderEvent(
+        original: String,
+        phrase: String,
+        newMsgId: UInt64,
+        xml: String?,
+        fallbackTime: String
+    ) throws -> String {
+        let pointer: UnsafeMutablePointer<CChar>?
+        if let xml {
+            pointer = xml.withCString { xmlPointer in
+                wechat_antirecall_render_revoke_tip_for_event_copy(original, phrase, newMsgId, xmlPointer, fallbackTime)
+            }
+        } else {
+            pointer = wechat_antirecall_render_revoke_tip_for_event_copy(original, phrase, newMsgId, nil, fallbackTime)
+        }
+
         let unwrapped = try XCTUnwrap(pointer)
         defer {
             wechat_antirecall_free(unwrapped)

@@ -6,7 +6,9 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "WeChatAntiRecallRuntime.h"
@@ -18,10 +20,13 @@ constexpr uintptr_t parseRevokeXMLOriginalBody = 0x4764540;
 constexpr ptrdiff_t revokeNewMsgIdOffset = 0x168;
 constexpr ptrdiff_t revokeReplaceMsgOffset = 0x170;
 constexpr NSUInteger revokeTipMaximumLength = 120;
+constexpr size_t revokeTimeCacheMaximumCount = 512;
 
 using ParseRevokeXML = bool (*)(void *, std::string *, void *, uint32_t);
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
+std::mutex revokeTimeCacheMutex;
+std::unordered_map<std::string, std::string> revokeTimeCache;
 
 std::string trimCopy(const std::string &value) {
     const char *whitespace = " \t\r\n\"'";
@@ -84,20 +89,36 @@ std::string extractSenderName(const std::string &originalTip) {
     return "";
 }
 
+const std::vector<std::string> &revokeTipPlaceholders() {
+    static const std::vector<std::string> placeholders = {
+        "{from}",
+        "{time}",
+    };
+    return placeholders;
+}
+
 std::vector<std::string> literalPartsForTemplate(const std::string &configuredPhrase) {
-    static const std::string placeholder = "{from}";
     std::vector<std::string> parts;
     size_t cursor = 0;
 
     while (true) {
-        const auto position = configuredPhrase.find(placeholder, cursor);
-        if (position == std::string::npos) {
+        size_t nextPosition = std::string::npos;
+        size_t nextLength = 0;
+        for (const auto &placeholder : revokeTipPlaceholders()) {
+            const auto position = configuredPhrase.find(placeholder, cursor);
+            if (position != std::string::npos && (nextPosition == std::string::npos || position < nextPosition)) {
+                nextPosition = position;
+                nextLength = placeholder.size();
+            }
+        }
+
+        if (nextPosition == std::string::npos) {
             parts.push_back(configuredPhrase.substr(cursor));
             return parts;
         }
 
-        parts.push_back(configuredPhrase.substr(cursor, position - cursor));
-        cursor = position + placeholder.size();
+        parts.push_back(configuredPhrase.substr(cursor, nextPosition - cursor));
+        cursor = nextPosition + nextLength;
     }
 }
 
@@ -150,7 +171,137 @@ std::string normalizeRenderedTip(const std::string &tip, const std::string &conf
     return normalized;
 }
 
-std::string renderRevokeTip(const std::string &originalTip, const std::string &configuredPhrase) {
+std::string currentTimeText() {
+    @autoreleasepool {
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"HH:mm";
+        NSString *value = [formatter stringFromDate:[NSDate date]];
+        const char *utf8 = [value UTF8String];
+        return utf8 == nullptr ? "" : std::string(utf8);
+    }
+}
+
+bool parseUnsignedInteger(const std::string &value, uint64_t &result) {
+    const auto trimmed = trimCopy(value);
+    if (trimmed.empty()) {
+        return false;
+    }
+
+    uint64_t parsed = 0;
+    for (const char character : trimmed) {
+        if (character < '0' || character > '9') {
+            return false;
+        }
+
+        const uint64_t digit = static_cast<uint64_t>(character - '0');
+        if (parsed > (UINT64_MAX - digit) / 10) {
+            return false;
+        }
+        parsed = parsed * 10 + digit;
+    }
+
+    result = parsed;
+    return true;
+}
+
+std::string xmlTagValue(const std::string &xml, const std::string &tagName) {
+    const auto startTag = "<" + tagName + ">";
+    const auto endTag = "</" + tagName + ">";
+    const auto start = xml.find(startTag);
+    if (start == std::string::npos) {
+        return "";
+    }
+
+    const auto valueStart = start + startTag.size();
+    const auto end = xml.find(endTag, valueStart);
+    if (end == std::string::npos) {
+        return "";
+    }
+
+    return xml.substr(valueStart, end - valueStart);
+}
+
+std::string formatUnixTimestamp(uint64_t timestamp) {
+    if (timestamp > 10'000'000'000ULL) {
+        timestamp /= 1000;
+    }
+
+    @autoreleasepool {
+        NSDate *date = [NSDate dateWithTimeIntervalSince1970:static_cast<NSTimeInterval>(timestamp)];
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"HH:mm";
+        NSString *value = [formatter stringFromDate:date];
+        const char *utf8 = [value UTF8String];
+        return utf8 == nullptr ? "" : std::string(utf8);
+    }
+}
+
+std::string timeTextFromXML(const std::string *xml) {
+    if (xml == nullptr || xml->empty()) {
+        return "";
+    }
+
+    static const std::vector<std::string> timeTags = {
+        "createtime",
+        "createTime",
+        "CreateTime",
+        "time",
+    };
+
+    for (const auto &tag : timeTags) {
+        uint64_t timestamp = 0;
+        if (parseUnsignedInteger(xmlTagValue(*xml, tag), timestamp)) {
+            return formatUnixTimestamp(timestamp);
+        }
+    }
+
+    return "";
+}
+
+std::string revokeTimeCacheKey(uint64_t newMsgId, const std::string *xml, const std::string &originalTip) {
+    if (newMsgId != 0) {
+        return "id:" + std::to_string(newMsgId);
+    }
+    if (xml != nullptr && !xml->empty()) {
+        return "xml:" + std::to_string(std::hash<std::string>{}(*xml));
+    }
+    return "tip:" + std::to_string(std::hash<std::string>{}(originalTip));
+}
+
+std::string stableRevokeTimeText(
+    uint64_t newMsgId,
+    const std::string *xml,
+    const std::string &originalTip,
+    const std::string &fallbackTime
+) {
+    const auto xmlTime = timeTextFromXML(xml);
+    if (!xmlTime.empty()) {
+        return xmlTime;
+    }
+
+    const auto key = revokeTimeCacheKey(newMsgId, xml, originalTip);
+    std::lock_guard<std::mutex> lock(revokeTimeCacheMutex);
+
+    const auto found = revokeTimeCache.find(key);
+    if (found != revokeTimeCache.end()) {
+        return found->second;
+    }
+
+    if (revokeTimeCache.size() >= revokeTimeCacheMaximumCount) {
+        revokeTimeCache.clear();
+    }
+
+    revokeTimeCache[key] = fallbackTime;
+    return fallbackTime;
+}
+
+std::string renderRevokeTip(
+    const std::string &originalTip,
+    const std::string &configuredPhrase,
+    const std::string &timeText
+) {
     if (configuredPhrase.empty()) {
         return originalTip;
     }
@@ -161,11 +312,20 @@ std::string renderRevokeTip(const std::string &originalTip, const std::string &c
 
     auto rendered = configuredPhrase;
     replaceAll(rendered, "{from}", extractSenderName(originalTip));
+    replaceAll(rendered, "{time}", timeText);
     return rendered;
+}
+
+std::string renderRevokeTip(const std::string &originalTip, const std::string &configuredPhrase) {
+    return renderRevokeTip(originalTip, configuredPhrase, currentTimeText());
 }
 
 NSString *revokeTipPreferenceKey() {
     return @"WeChatAntiRecall_RevokeTipPhrase";
+}
+
+NSString *revokeTipDebugProbePreferenceKey() {
+    return @"WeChatAntiRecall_RevokeTipDebugProbe";
 }
 
 NSString *defaultRevokeTipPhrase() {
@@ -211,6 +371,41 @@ NSString *phraseFromPlist(NSString *plistPath) {
     return validPhraseOrNil((NSString *)phrase);
 }
 
+NSNumber *probeFlagFromValue(id value) {
+    if ([value isKindOfClass:[NSNumber class]]) {
+        return (NSNumber *)value;
+    }
+
+    if ([value isKindOfClass:[NSString class]]) {
+        NSString *normalized = [(NSString *)value lowercaseString];
+        if ([normalized isEqualToString:@"1"] || [normalized isEqualToString:@"true"] || [normalized isEqualToString:@"yes"] || [normalized isEqualToString:@"on"]) {
+            return @YES;
+        }
+        if ([normalized isEqualToString:@"0"] || [normalized isEqualToString:@"false"] || [normalized isEqualToString:@"no"] || [normalized isEqualToString:@"off"]) {
+            return @NO;
+        }
+    }
+
+    return nil;
+}
+
+NSNumber *probeFlagFromDefaults(NSUserDefaults *defaults) {
+    if (defaults == nil) {
+        return nil;
+    }
+
+    return probeFlagFromValue([defaults objectForKey:revokeTipDebugProbePreferenceKey()]);
+}
+
+NSNumber *probeFlagFromPlist(NSString *plistPath) {
+    if (plistPath.length == 0) {
+        return nil;
+    }
+
+    NSDictionary *preferences = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+    return probeFlagFromValue(preferences[revokeTipDebugProbePreferenceKey()]);
+}
+
 NSArray<NSString *> *preferencePlistPaths(NSString *homeDirectory) {
     if (homeDirectory.length == 0) {
         return @[];
@@ -227,6 +422,16 @@ NSString *phraseFromPreferencePlists(NSString *homeDirectory) {
         NSString *phrase = phraseFromPlist(plistPath);
         if (phrase != nil) {
             return phrase;
+        }
+    }
+    return nil;
+}
+
+NSNumber *probeFlagFromPreferencePlists(NSString *homeDirectory) {
+    for (NSString *plistPath in preferencePlistPaths(homeDirectory)) {
+        NSNumber *probeEnabled = probeFlagFromPlist(plistPath);
+        if (probeEnabled != nil) {
+            return probeEnabled;
         }
     }
     return nil;
@@ -253,6 +458,27 @@ NSString *configuredPhraseForHomeDirectory(NSString *homeDirectory) {
     return defaultRevokeTipPhrase();
 }
 
+bool debugProbeEnabledForHomeDirectory(NSString *homeDirectory) {
+    NSNumber *probeEnabled = probeFlagFromDefaults([NSUserDefaults standardUserDefaults]);
+    if (probeEnabled != nil) {
+        return [probeEnabled boolValue];
+    }
+
+    NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.tencent.xinWeChat"];
+    probeEnabled = probeFlagFromDefaults(suiteDefaults);
+    if (probeEnabled != nil) {
+        return [probeEnabled boolValue];
+    }
+
+    NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
+    probeEnabled = probeFlagFromPreferencePlists(home);
+    if (probeEnabled != nil) {
+        return [probeEnabled boolValue];
+    }
+
+    return false;
+}
+
 NSString *configuredPhraseFromPreferencePlistsForHomeDirectory(NSString *homeDirectory) {
     NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
     NSString *phrase = phraseFromPreferencePlists(home);
@@ -265,6 +491,41 @@ NSString *configuredPhraseFromPreferencePlistsForHomeDirectory(NSString *homeDir
 
 NSString *configuredPhrase() {
     return configuredPhraseForHomeDirectory(nil);
+}
+
+bool debugProbeEnabled() {
+    return debugProbeEnabledForHomeDirectory(nil);
+}
+
+std::string previewString(const std::string &value) {
+    auto preview = value;
+    replaceAll(preview, "\n", "\\n");
+    replaceAll(preview, "\r", "\\r");
+
+    constexpr size_t maximumLength = 512;
+    if (preview.size() > maximumLength) {
+        preview = preview.substr(0, maximumLength) + "...";
+    }
+    return preview;
+}
+
+NSString *nsStringFromStdString(const std::string &value) {
+    NSString *string = [[NSString alloc] initWithBytes:value.data() length:value.size() encoding:NSUTF8StringEncoding];
+    return string == nil ? @"<non-utf8>" : string;
+}
+
+void logRevokeProbe(uint32_t msgType, uint64_t newMsgId, const std::string &replaceMsg, const std::string *xml) {
+    @autoreleasepool {
+        NSString *replacePreview = nsStringFromStdString(previewString(replaceMsg));
+        NSString *xmlPreview = xml == nullptr ? @"<nil>" : nsStringFromStdString(previewString(*xml));
+        NSLog(
+            @"[WeChatAntiRecall] revoke probe msgType=%u newmsgid=%llu replaceMsg=%@ xml=%@",
+            msgType,
+            newMsgId,
+            replacePreview,
+            xmlPreview
+        );
+    }
 }
 
 char *copyCString(const char *value) {
@@ -297,12 +558,19 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
 
     auto *newMsgId = reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(message) + revokeNewMsgIdOffset);
     auto *replaceMsg = reinterpret_cast<std::string *>(reinterpret_cast<uint8_t *>(message) + revokeReplaceMsgOffset);
+    const uint64_t originalNewMsgId = *newMsgId;
+    const std::string originalReplaceMsg = *replaceMsg;
 
     @autoreleasepool {
+        if (debugProbeEnabled()) {
+            logRevokeProbe(msgType, originalNewMsgId, originalReplaceMsg, xml);
+        }
+
         const char *phrase = [configuredPhrase() UTF8String];
         if (phrase != nullptr) {
             *newMsgId = 0;
-            replaceMsg->assign(renderRevokeTip(*replaceMsg, phrase));
+            const auto timeText = stableRevokeTimeText(originalNewMsgId, xml, originalReplaceMsg, currentTimeText());
+            replaceMsg->assign(renderRevokeTip(originalReplaceMsg, phrase, timeText));
         }
     }
 
@@ -370,11 +638,33 @@ char *wechat_antirecall_render_revoke_tip_copy(const char *originalTip, const ch
     return copyCString(rendered.c_str());
 }
 
+char *wechat_antirecall_render_revoke_tip_for_event_copy(
+    const char *originalTip,
+    const char *configuredPhrase,
+    uint64_t newMsgId,
+    const char *xml,
+    const char *fallbackTime
+) {
+    const std::string original = originalTip == nullptr ? "" : originalTip;
+    const std::string phrase = configuredPhrase == nullptr ? "" : configuredPhrase;
+    const std::string xmlString = xml == nullptr ? "" : xml;
+    const std::string fallback = fallbackTime == nullptr ? currentTimeText() : fallbackTime;
+    const auto timeText = stableRevokeTimeText(newMsgId, xml == nullptr ? nullptr : &xmlString, original, fallback);
+    const auto rendered = renderRevokeTip(original, phrase, timeText);
+
+    return copyCString(rendered.c_str());
+}
+
 char *wechat_antirecall_load_revoke_tip_phrase_for_home_copy(const char *homeDirectory) {
     @autoreleasepool {
         NSString *home = homeDirectory == nullptr ? nil : [NSString stringWithUTF8String:homeDirectory];
         return copyNSString(configuredPhraseFromPreferencePlistsForHomeDirectory(home));
     }
+}
+
+void wechat_antirecall_clear_revoke_tip_time_cache(void) {
+    std::lock_guard<std::mutex> lock(revokeTimeCacheMutex);
+    revokeTimeCache.clear();
 }
 
 void wechat_antirecall_free(void *pointer) {

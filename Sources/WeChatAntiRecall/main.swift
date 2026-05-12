@@ -207,8 +207,15 @@ struct RecallTipPhrase: Equatable {
         try! RecallTipPhrase(defaultText)
     }
 
-    func rendered(senderName: String?) -> String {
-        text.replacingOccurrences(of: "{from}", with: senderName ?? "")
+    func rendered(senderName: String?, timestamp: Date = Date(), timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm"
+
+        return text
+            .replacingOccurrences(of: "{from}", with: senderName ?? "")
+            .replacingOccurrences(of: "{time}", with: formatter.string(from: timestamp))
     }
 }
 
@@ -249,7 +256,7 @@ struct RecallTipPreview {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
 
         return """
-        [\(Self.fixedPrefix)] \(phrase.rendered(senderName: senderName))
+        [\(Self.fixedPrefix)] \(phrase.rendered(senderName: senderName, timestamp: timestamp, timeZone: timeZone))
         [\(messageKind)]\(messageText)
         \(formatter.string(from: timestamp))
         """
@@ -261,6 +268,12 @@ enum RecallTipPhraseAction: Equatable {
     case set(RecallTipPhrase)
     case reset
     case preview(phrase: RecallTipPhrase, senderName: String?, messageKind: String, messageText: String)
+    case probe(RecallTipProbeAction)
+}
+
+enum RecallTipProbeAction: Equatable {
+    case get
+    case set(Bool)
 }
 
 struct RecallTipPhraseOptions {
@@ -314,6 +327,24 @@ struct RecallTipPhraseOptions {
                 messageKind: messageKind,
                 messageText: messageText
             )
+        case "probe":
+            guard let probeCommand = parser.next() else {
+                throw ToolError.usage("tip-phrase probe 需要 get、on 或 off")
+            }
+            guard parser.next() == nil else {
+                throw ToolError.usage("tip-phrase probe 不接受额外参数")
+            }
+
+            switch probeCommand {
+            case "get":
+                action = .probe(.get)
+            case "on":
+                action = .probe(.set(true))
+            case "off":
+                action = .probe(.set(false))
+            default:
+                throw ToolError.usage("未知 tip-phrase probe 命令：\(probeCommand)")
+            }
         default:
             throw ToolError.usage("未知 tip-phrase 命令：\(command)")
         }
@@ -323,6 +354,7 @@ struct RecallTipPhraseOptions {
 struct RecallTipPreferenceStore {
     static let domain = "com.tencent.xinWeChat"
     static let key = "WeChatAntiRecall_RevokeTipPhrase"
+    static let probeKey = "WeChatAntiRecall_RevokeTipDebugProbe"
 
     let preferenceFileURL: URL
 
@@ -355,6 +387,17 @@ struct RecallTipPreferenceStore {
         guard preferences.removeValue(forKey: Self.key) != nil else {
             return
         }
+        try writePreferences(preferences)
+    }
+
+    func isProbeEnabled() throws -> Bool {
+        let preferences = try readPreferences()
+        return preferences[Self.probeKey] as? Bool ?? false
+    }
+
+    func setProbeEnabled(_ enabled: Bool) throws {
+        var preferences = try readPreferences()
+        preferences[Self.probeKey] = enabled
         try writePreferences(preferences)
     }
 
@@ -601,6 +644,19 @@ struct CLI {
             printPreview(phrase: .default, senderName: "张三", messageKind: "文本消息", messageText: "这是一条示例消息")
         case .preview(let phrase, let senderName, let messageKind, let messageText):
             printPreview(phrase: phrase, senderName: senderName, messageKind: messageKind, messageText: messageText)
+        case .probe(let action):
+            switch action {
+            case .get:
+                print("Debug probe: \(try store.isProbeEnabled() ? "enabled" : "disabled")")
+                print("File: \(store.preferenceFileURL.path)")
+            case .set(let enabled):
+                try store.setProbeEnabled(enabled)
+                print("Debug probe: \(enabled ? "enabled" : "disabled")")
+                print("File: \(store.preferenceFileURL.path)")
+                if enabled {
+                    print("Warning: probe logs revoke metadata and XML previews to macOS Console. Turn it off after collecting evidence.")
+                }
+            }
         }
     }
 
@@ -683,6 +739,7 @@ struct CLI {
           wechat-antirecall tip-phrase set <phrase>
           wechat-antirecall tip-phrase reset
           wechat-antirecall tip-phrase preview <phrase> [--from <name>] [--type <kind>] [--message <text>]
+          wechat-antirecall tip-phrase probe get|on|off
 
         Notes:
           install only patches versions present in patches.json.
