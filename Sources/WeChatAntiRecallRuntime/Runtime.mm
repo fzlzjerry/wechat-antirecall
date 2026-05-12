@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "WeChatAntiRecallRuntime.h"
 
@@ -50,6 +51,11 @@ bool hasSuffix(const std::string &value, const std::string &suffix) {
         value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+bool hasPrefix(const std::string &value, const std::string &prefix) {
+    return value.size() >= prefix.size() &&
+        value.compare(0, prefix.size(), prefix) == 0;
+}
+
 bool isTargetWeChatDylibPath(const char *imageName) {
     if (imageName == nullptr) {
         return false;
@@ -78,9 +84,79 @@ std::string extractSenderName(const std::string &originalTip) {
     return "";
 }
 
+std::vector<std::string> literalPartsForTemplate(const std::string &configuredPhrase) {
+    static const std::string placeholder = "{from}";
+    std::vector<std::string> parts;
+    size_t cursor = 0;
+
+    while (true) {
+        const auto position = configuredPhrase.find(placeholder, cursor);
+        if (position == std::string::npos) {
+            parts.push_back(configuredPhrase.substr(cursor));
+            return parts;
+        }
+
+        parts.push_back(configuredPhrase.substr(cursor, position - cursor));
+        cursor = position + placeholder.size();
+    }
+}
+
+bool matchesRenderedTemplate(const std::string &tip, const std::string &configuredPhrase) {
+    const auto parts = literalPartsForTemplate(configuredPhrase);
+    if (parts.size() <= 1) {
+        return tip == configuredPhrase;
+    }
+
+    if (!parts.front().empty() && !hasPrefix(tip, parts.front())) {
+        return false;
+    }
+    if (!parts.back().empty() && !hasSuffix(tip, parts.back())) {
+        return false;
+    }
+
+    size_t cursor = parts.front().empty() ? 0 : parts.front().size();
+    for (size_t index = 1; index < parts.size(); index += 1) {
+        const auto &part = parts[index];
+        if (part.empty()) {
+            continue;
+        }
+
+        const auto position = tip.find(part, cursor);
+        if (position == std::string::npos) {
+            return false;
+        }
+        cursor = position + part.size();
+    }
+
+    return true;
+}
+
+std::string normalizeRenderedTip(const std::string &tip, const std::string &configuredPhrase) {
+    auto normalized = tip;
+    const auto parts = literalPartsForTemplate(configuredPhrase);
+    if (parts.size() <= 1 || parts.front().empty()) {
+        return normalized;
+    }
+
+    const auto &prefix = parts.front();
+    while (hasPrefix(normalized, prefix + prefix)) {
+        auto candidate = normalized.substr(prefix.size());
+        if (!matchesRenderedTemplate(candidate, configuredPhrase)) {
+            break;
+        }
+        normalized = candidate;
+    }
+
+    return normalized;
+}
+
 std::string renderRevokeTip(const std::string &originalTip, const std::string &configuredPhrase) {
     if (configuredPhrase.empty()) {
         return originalTip;
+    }
+
+    if (matchesRenderedTemplate(originalTip, configuredPhrase)) {
+        return normalizeRenderedTip(originalTip, configuredPhrase);
     }
 
     auto rendered = configuredPhrase;

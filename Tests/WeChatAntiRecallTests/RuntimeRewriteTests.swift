@@ -8,6 +8,22 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(rendered, "已拦截 张三 撤回的一条消息")
     }
 
+    func testRenderingConfiguredPhraseIsIdempotent() throws {
+        let phrase = "已拦截 {from} 撤回的一条消息"
+        let rendered = try render(original: "Benjamin撤回了一条消息", phrase: phrase)
+
+        XCTAssertEqual(try render(original: rendered, phrase: phrase), rendered)
+    }
+
+    func testRenderingCollapsesPreviouslyDuplicatedPrefix() throws {
+        let rendered = try render(
+            original: "已拦截 已拦截 Benjamin 撤回的一条消息",
+            phrase: "已拦截 {from} 撤回的一条消息"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 Benjamin 撤回的一条消息")
+    }
+
     func testRendersConfiguredPhraseWithoutSenderWhenSenderIsUnknown() throws {
         let rendered = try render(original: "You recalled a message.", phrase: "已拦截 {from} 撤回的一条消息")
 
