@@ -142,6 +142,71 @@
         ]
       },
       {
+        "identifier": "multiInstance",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "1000187b8",
+            "expected": [
+              "FF8306D1F65717A9",
+              "00008052C0035FD6"
+            ],
+            "asm": "00008052C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100021a3c",
+            "expected": [
+              "13008012",
+              "13008052"
+            ],
+            "asm": "13008052"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100022194",
+            "expected": [
+              "13008012",
+              "13008052"
+            ],
+            "asm": "13008052"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100021bfc",
+            "expected": [
+              "F30300AA",
+              "F3031FAA"
+            ],
+            "asm": "F3031FAA"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100021c00",
+            "expected": [
+              "80160034",
+              "B4000014"
+            ],
+            "asm": "B4000014"
+          }
+        ]
+      },
+      {
+        "identifier": "multiInstance-extra",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "1ec660",
+            "expected": [
+              "B43E0036",
+              "1F2003D5"
+            ],
+            "asm": "1F2003D5"
+          }
+        ]
+      },
+      {
         "identifier": "update",
         "binary": "Contents/Resources/wechat.dylib",
         "entries": [
