@@ -27,6 +27,9 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 
 **无限多开（`--multi-instance`）**：绕过微信 4.1.9 进程互斥检查，允许同时启动多个客户端实例（当前仅 `268575` 提供该目标）。
 
+<u>使用方法：选择带有多开参数的命令安装后，使用命令 `open -n /Applications/WeChat.app` 或者 使用多开启动器： [WeChatMulti](https://github.com/loohalh/WeChatMulti)</u>
+
+
 **屏蔽自动更新（`--block-update` / `--update-only`）**：针对微信 4.1.9 的 `XAppUpdateManager`，屏蔽 `startUpdater`、`startBackgroundUpdatesCheck:`、`checkForUpdates:`、`enableAutoUpdate:` 等入口，并让 `automaticallyDownloadsUpdates`、`canCheckForUpdate` 返回 `false`。
 
 ## 用法
