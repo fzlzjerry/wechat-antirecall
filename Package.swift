@@ -8,9 +8,23 @@ let package = Package(
         .macOS(.v12)
     ],
     products: [
-        .executable(name: "wechat-antirecall", targets: ["WeChatAntiRecall"])
+        .executable(name: "wechat-antirecall", targets: ["WeChatAntiRecall"]),
+        .library(name: "WeChatAntiRecallRuntime", type: .dynamic, targets: ["WeChatAntiRecallRuntime"])
     ],
     targets: [
-        .executableTarget(name: "WeChatAntiRecall")
+        .executableTarget(name: "WeChatAntiRecall"),
+        .target(
+            name: "WeChatAntiRecallRuntime",
+            linkerSettings: [
+                .linkedFramework("Foundation")
+            ]
+        ),
+        .testTarget(
+            name: "WeChatAntiRecallTests",
+            dependencies: [
+                "WeChatAntiRecall",
+                "WeChatAntiRecallRuntime"
+            ]
+        )
     ]
 )

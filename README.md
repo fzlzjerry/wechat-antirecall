@@ -14,6 +14,7 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 | 36559 | x86_64 | `Contents/Frameworks/wechat.dylib` |
 | 268575 | arm64 | `multiInstance` 在 `Contents/MacOS/WeChat` |
 | 268575, 268596, 268597 | arm64 | `Contents/Resources/wechat.dylib` |
+| 268597 | arm64 | 自定义撤回提示运行时 `--runtime-tip` |
 
 > **268575 / 268596 / 268597（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
 
@@ -24,6 +25,8 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 **静默模式（默认）**：直接跳过 `revokemsg` 系统消息解析分支，撤回的消息保持原样显示，无任何提示。
 
 **提示模式（`--with-tip`）**：不跳过 `revokemsg` 解析，让微信继续读取 `replacemsg` 撤回提示，同时把撤回包里的 `newmsgid` 清零，阻止微信按原消息 SvrID 删除已有消息。效果与 BetterWX/WeChatTweak 的"保留提示、阻断删除"策略一致。
+
+**自定义撤回提示短语（`tip-phrase` + `--runtime-tip`）**：提供 X1a0He 风格的短语配置入口，支持 `{from}` 占位符和本地预览。`tip-phrase` 写入当前登录用户的 WeChat 容器偏好文件，请用普通用户执行，不要用 `sudo`。`--runtime-tip` 会把运行时 dylib 安装到 `Contents/Resources`，并给 `wechat.dylib` 注入 `LC_LOAD_DYLIB`，让撤回提示改用配置短语；目前只支持构建号 `268597`。
 
 **无限多开（`--multi-instance`）**：绕过微信 4.1.9 进程互斥检查，允许同时启动多个客户端实例（当前仅 `268575` 提供该目标）。
 
@@ -62,6 +65,41 @@ swift run wechat-antirecall install --with-tip --block-update --dry-run --app /A
 swift run wechat-antirecall install --with-tip --block-update --multi-instance --dry-run --app /Applications/WeChat.app
 ```
 
+**可选步骤**：配置自定义撤回提示短语。
+
+短语最长 120 个字符，不能包含换行。`{from}` 会在运行时替换成发送者备注或昵称。未配置时默认显示 `已拦截一条撤回消息`。
+
+```bash
+# 查看当前短语
+swift run wechat-antirecall tip-phrase get
+
+# 预览短语效果，不写入配置
+swift run wechat-antirecall tip-phrase preview "已拦截 {from} 撤回的一条消息" --from 张三
+
+# 写入 WeChat 容器偏好配置。不要用 sudo 执行。
+swift run wechat-antirecall tip-phrase set "已拦截 {from} 撤回的一条消息"
+
+# 恢复默认短语
+swift run wechat-antirecall tip-phrase reset
+```
+
+配置位置：
+
+```text
+~/Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences/com.tencent.xinWeChat.plist
+```
+
+修改短语后请完全退出并重新打开微信。已启动的 WeChat 进程可能持有旧的偏好缓存，重启后 runtime 会重新读取容器 plist。
+
+自定义短语要实际显示在聊天里，还需要安装运行时 hook。运行时 dylib 不会由普通 `swift run` 自动放到 release 目录，先构建 release，再做 dry-run：
+
+```bash
+swift build -c release
+.build/release/wechat-antirecall install --runtime-tip --dry-run --app /Applications/WeChat.app
+```
+
+`--runtime-tip` 会自动选择提示模式，不需要再额外加 `--with-tip`。
+
 **第三步**：确认无误后安装。
 
 安装前请先完全退出微信。不要在微信仍运行时写入补丁；否则已启动的进程可能在执行到被修改过的代码页时被 macOS 以 `Code Signature Invalid` 终止。
@@ -74,6 +112,9 @@ sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
 
 # 提示模式
 sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app
+
+# 自定义撤回提示短语（仅 268597）
+sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app
 
 # 提示模式 + 多开
 sudo .build/release/wechat-antirecall install --with-tip --multi-instance --app /Applications/WeChat.app
@@ -116,6 +157,7 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 ```bash
 sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app --no-backup
+sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --with-tip --multi-instance --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --update-only --app /Applications/WeChat.app --no-backup
 ```
@@ -123,6 +165,7 @@ sudo .build/release/wechat-antirecall install --update-only --app /Applications/
 ### 验证签名
 
 ```bash
+codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/Resources/libWeChatAntiRecallRuntime.dylib
 codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/Resources/wechat.dylib
 codesign --verify --deep --strict --verbose=2 /Applications/WeChat.app
 ```
@@ -135,6 +178,8 @@ sudo .build/release/wechat-antirecall restore \
   --backup /Applications/WeChat.app/Contents/Resources/wechat.dylib.wechat-antirecall-backup-YYYYMMDD-HHMMSS \
   --app /Applications/WeChat.app
 ```
+
+恢复 `wechat.dylib` 备份后，runtime 的 load command 会随备份一起消失；`Contents/Resources/libWeChatAntiRecallRuntime.dylib` 即使留在目录里也不会再被加载。
 
 ## 补丁配置格式
 
@@ -173,6 +218,7 @@ sudo .build/release/wechat-antirecall restore \
 - [sunnyyoung/WeChatTweak](https://github.com/sunnyyoung/WeChatTweak-macOS) — upstream，包含 `Block message recall` 功能
 - [tanranv5/WeChatTweak](https://github.com/tanranv5/WeChatTweak) — 社区 fork，补充较新 x86_64 配置，引入 `binary` 字段
 - [zetaloop/BetterWX](https://github.com/zetaloop/BetterWX) — Windows 版微信 4 的同类提示模式补丁
+- [X1a0He/X1a0HeWeChatPlugin](https://github.com/X1a0He/X1a0HeWeChatPlugin) — 感谢该项目为自定义撤回提示短语功能提供实现思路
 - [naizhao/WeChatTweak](https://github.com/naizhao/WeChatTweak/blob/master/MAINTAINING.md) — 社区 fork, 维护指南
 
 ## 友链

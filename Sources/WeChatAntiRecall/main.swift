@@ -4,6 +4,7 @@ import Darwin
 private let defaultAppPath = "/Applications/WeChat.app"
 private let defaultBinaryPath = "Contents/MacOS/WeChat"
 private let lcSegment64: UInt32 = 0x19
+private let lcLoadDylib: UInt32 = 0xc
 private let mhMagic64: UInt32 = 0xfeedfacf
 private let fatMagic: UInt32 = 0xcafebabe
 private let fatMagic64: UInt32 = 0xcafebabf
@@ -164,6 +165,251 @@ struct PatchReport {
     let status: PatchStatus
 }
 
+enum DylibInjectionStatus: Equatable {
+    case injected
+    case wouldInject
+    case alreadyInjected
+}
+
+struct DylibInjectionReport {
+    let arch: CPUArch
+    let installName: String
+    let commandOffset: UInt64
+    let paddingLeft: UInt64
+    let status: DylibInjectionStatus
+}
+
+struct RecallTipPhrase: Equatable {
+    static let defaultText = "已拦截一条撤回消息"
+    static let maximumLength = 120
+
+    let text: String
+
+    init(_ value: String) throws {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw RecallTipPhraseError.empty
+        }
+        guard !trimmed.contains(where: \.isNewline) else {
+            throw RecallTipPhraseError.containsNewline
+        }
+        guard !trimmed.contains("]]>") else {
+            throw RecallTipPhraseError.containsCDATAEndMarker
+        }
+        guard trimmed.count <= Self.maximumLength else {
+            throw RecallTipPhraseError.tooLong(maximumLength: Self.maximumLength)
+        }
+
+        text = trimmed
+    }
+
+    static var `default`: RecallTipPhrase {
+        try! RecallTipPhrase(defaultText)
+    }
+
+    func rendered(senderName: String?) -> String {
+        text.replacingOccurrences(of: "{from}", with: senderName ?? "")
+    }
+}
+
+enum RecallTipPhraseError: LocalizedError, Equatable {
+    case empty
+    case containsNewline
+    case containsCDATAEndMarker
+    case tooLong(maximumLength: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .empty:
+            return "撤回提示短语不能为空"
+        case .containsNewline:
+            return "撤回提示短语不能包含换行"
+        case .containsCDATAEndMarker:
+            return "撤回提示短语不能包含 CDATA 结束标记"
+        case .tooLong(let maximumLength):
+            return "撤回提示短语不能超过 \(maximumLength) 个字符"
+        }
+    }
+}
+
+struct RecallTipPreview {
+    static let fixedPrefix = "WeChat Anti-Recall"
+
+    let phrase: RecallTipPhrase
+    let senderName: String?
+    let messageKind: String
+    let messageText: String
+    let timestamp: Date
+    let timeZone: TimeZone
+
+    func render() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+
+        return """
+        [\(Self.fixedPrefix)] \(phrase.rendered(senderName: senderName))
+        [\(messageKind)]\(messageText)
+        \(formatter.string(from: timestamp))
+        """
+    }
+}
+
+enum RecallTipPhraseAction: Equatable {
+    case get
+    case set(RecallTipPhrase)
+    case reset
+    case preview(phrase: RecallTipPhrase, senderName: String?, messageKind: String, messageText: String)
+}
+
+struct RecallTipPhraseOptions {
+    let action: RecallTipPhraseAction
+
+    init(_ arguments: [String]) throws {
+        var parser = ArgumentCursor(arguments)
+        guard let command = parser.next() else {
+            throw ToolError.usage("tip-phrase 需要 get、set、reset 或 preview")
+        }
+
+        switch command {
+        case "get":
+            guard parser.next() == nil else {
+                throw ToolError.usage("tip-phrase get 不接受额外参数")
+            }
+            action = .get
+        case "set":
+            let phrase = try RecallTipPhrase(parser.requiredValue(after: "set"))
+            guard parser.next() == nil else {
+                throw ToolError.usage("tip-phrase set 只接受一个短语")
+            }
+            action = .set(phrase)
+        case "reset":
+            guard parser.next() == nil else {
+                throw ToolError.usage("tip-phrase reset 不接受额外参数")
+            }
+            action = .reset
+        case "preview":
+            let phrase = try RecallTipPhrase(parser.requiredValue(after: "preview"))
+            var senderName: String?
+            var messageKind = "文本消息"
+            var messageText = "这是一条示例消息"
+
+            while let argument = parser.next() {
+                switch argument {
+                case "--from":
+                    senderName = try parser.requiredValue(after: argument)
+                case "--type":
+                    messageKind = try parser.requiredValue(after: argument)
+                case "--message":
+                    messageText = try parser.requiredValue(after: argument)
+                default:
+                    throw ToolError.usage("未知参数：\(argument)")
+                }
+            }
+
+            action = .preview(
+                phrase: phrase,
+                senderName: senderName,
+                messageKind: messageKind,
+                messageText: messageText
+            )
+        default:
+            throw ToolError.usage("未知 tip-phrase 命令：\(command)")
+        }
+    }
+}
+
+struct RecallTipPreferenceStore {
+    static let domain = "com.tencent.xinWeChat"
+    static let key = "WeChatAntiRecall_RevokeTipPhrase"
+
+    let preferenceFileURL: URL
+
+    init(homeDirectory: URL = RecallTipPreferenceStore.defaultHomeDirectory()) {
+        preferenceFileURL = homeDirectory
+            .appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences")
+            .appendingPathComponent("\(Self.domain).plist")
+    }
+
+    func load() throws -> RecallTipPhrase? {
+        let preferences = try readPreferences()
+        guard let value = preferences[Self.key] as? String else {
+            return nil
+        }
+        return try RecallTipPhrase(value)
+    }
+
+    func save(_ phrase: RecallTipPhrase) throws {
+        var preferences = try readPreferences()
+        preferences[Self.key] = phrase.text
+        try writePreferences(preferences)
+    }
+
+    func reset() throws {
+        guard FileManager.default.fileExists(atPath: preferenceFileURL.path) else {
+            return
+        }
+
+        var preferences = try readPreferences()
+        guard preferences.removeValue(forKey: Self.key) != nil else {
+            return
+        }
+        try writePreferences(preferences)
+    }
+
+    private func readPreferences() throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: preferenceFileURL.path) else {
+            return [:]
+        }
+
+        let data = try Data(contentsOf: preferenceFileURL)
+        guard !data.isEmpty else {
+            return [:]
+        }
+
+        var format = PropertyListSerialization.PropertyListFormat.binary
+        guard let preferences = try PropertyListSerialization.propertyList(
+            from: data,
+            options: [.mutableContainersAndLeaves],
+            format: &format
+        ) as? [String: Any] else {
+            throw ToolError.fileOperationFailed(
+                operation: "读取撤回提示短语配置",
+                path: preferenceFileURL.path,
+                underlying: "plist root is not a dictionary"
+            )
+        }
+
+        return preferences
+    }
+
+    private func writePreferences(_ preferences: [String: Any]) throws {
+        try FileManager.default.createDirectory(
+            at: preferenceFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: preferences,
+            format: .binary,
+            options: 0
+        )
+        try data.write(to: preferenceFileURL, options: .atomic)
+    }
+
+    private static func defaultHomeDirectory() -> URL {
+        if geteuid() == 0,
+           let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
+           sudoUser != "root",
+           let passwd = getpwnam(sudoUser) {
+            return URL(fileURLWithPath: String(cString: passwd.pointee.pw_dir), isDirectory: true)
+        }
+
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+}
+
 @main
 struct WeChatAntiRecall {
     static func main() {
@@ -191,6 +437,8 @@ struct CLI {
             try install(rest)
         case "restore":
             try restore(rest)
+        case "tip-phrase":
+            try tipPhrase(rest)
         case "help", "--help", "-h":
             printUsage()
         default:
@@ -240,16 +488,51 @@ struct CLI {
         let config = try configForInstalledApp(appInfo, configs: configs)
         let selectedTargets = try resolveTargets(config: config, options: options)
         let targets = selectedTargets.map(\.target)
+        let runtimeInstaller = options.runtimeTip ? try RuntimeTipInstaller(appInfo: appInfo, options: options) : nil
         var patchedBinaries: [URL] = []
         var backedUpBinaryPaths = Set<String>()
 
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
-        let modeText = selectedTargets.map { displayName(forTargetIdentifier: $0.identifier) }.joined(separator: ", ")
+        var modeComponents = selectedTargets.map { displayName(forTargetIdentifier: $0.identifier) }
+        if options.runtimeTip {
+            modeComponents.append("custom recall tip phrase runtime")
+        }
+        let modeText = modeComponents.joined(separator: ", ")
         print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
         print("Checking whether WeChat is running...")
         try ensureAppNotRunning(appInfo: appInfo, dryRun: options.dryRun)
         print("Checking install permissions...")
-        try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options)
+        try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options, runtimeInstaller: runtimeInstaller)
+
+        if let runtimeInstaller {
+            if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(runtimeInstaller.hostBinaryURL.standardizedFileURL.path).inserted {
+                print("Creating backup for \(RuntimeTipInstaller.hostBinaryPath)...")
+                let backupURL = try makeBackup(of: runtimeInstaller.hostBinaryURL)
+                print("Backup: \(backupURL.path)")
+            }
+
+            print(options.dryRun ? "Checking runtime tip injection..." : "Installing runtime tip support...")
+            let reports = try runtimeInstaller.install(dryRun: options.dryRun)
+            print("Runtime dylib: \(runtimeInstaller.sourceDylibURL.path) -> \(runtimeInstaller.destinationDylibRelativePath)")
+            print("Runtime loader target: \(RuntimeTipInstaller.hostBinaryPath)")
+            for report in reports {
+                let statusText: String
+                switch report.status {
+                case .injected:
+                    statusText = "injected"
+                case .wouldInject:
+                    statusText = "would inject"
+                case .alreadyInjected:
+                    statusText = "already injected"
+                }
+                print("  - \(report.arch.rawValue) \(report.installName) at file+0x\(String(report.commandOffset, radix: 16)) (\(statusText), padding left: \(report.paddingLeft))")
+            }
+
+            if !options.dryRun {
+                patchedBinaries.append(runtimeInstaller.hostBinaryURL)
+                patchedBinaries.append(runtimeInstaller.destinationDylibURL)
+            }
+        }
 
         for target in targets {
             let binaryURL = appInfo.appURL.appendingPathComponent(target.binaryPath)
@@ -290,6 +573,34 @@ struct CLI {
         } else {
             try resign(appURL: appInfo.appURL, nestedBinaries: patchedBinaries)
             print("Code signing complete.")
+        }
+    }
+
+    private func tipPhrase(_ arguments: [String]) throws {
+        let options = try RecallTipPhraseOptions(arguments)
+        let store = RecallTipPreferenceStore()
+
+        switch options.action {
+        case .get:
+            let phrase = try store.load() ?? .default
+            print("Domain: \(RecallTipPreferenceStore.domain)")
+            print("Key: \(RecallTipPreferenceStore.key)")
+            print("File: \(store.preferenceFileURL.path)")
+            print("Phrase: \(phrase.text)")
+        case .set(let phrase):
+            try store.save(phrase)
+            print("Saved recall tip phrase.")
+            print("Domain: \(RecallTipPreferenceStore.domain)")
+            print("Key: \(RecallTipPreferenceStore.key)")
+            print("File: \(store.preferenceFileURL.path)")
+            printPreview(phrase: phrase, senderName: "张三", messageKind: "文本消息", messageText: "这是一条示例消息")
+        case .reset:
+            try store.reset()
+            print("Reset recall tip phrase to default.")
+            print("File: \(store.preferenceFileURL.path)")
+            printPreview(phrase: .default, senderName: "张三", messageKind: "文本消息", messageText: "这是一条示例消息")
+        case .preview(let phrase, let senderName, let messageKind, let messageText):
+            printPreview(phrase: phrase, senderName: senderName, messageKind: messageKind, messageText: messageText)
         }
     }
 
@@ -366,14 +677,31 @@ struct CLI {
 
         Usage:
           wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json]
-          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
+          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--runtime-tip] [--runtime-dylib <path>] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
           wechat-antirecall restore  --backup <path> [--binary Contents/MacOS/WeChat] [--app /Applications/WeChat.app] [--skip-resign]
+          wechat-antirecall tip-phrase get
+          wechat-antirecall tip-phrase set <phrase>
+          wechat-antirecall tip-phrase reset
+          wechat-antirecall tip-phrase preview <phrase> [--from <name>] [--type <kind>] [--message <text>]
 
         Notes:
           install only patches versions present in patches.json.
           unknown WeChat builds are refused instead of guessed.
         """)
     }
+}
+
+private func printPreview(phrase: RecallTipPhrase, senderName: String?, messageKind: String, messageText: String) {
+    let preview = RecallTipPreview(
+        phrase: phrase,
+        senderName: senderName,
+        messageKind: messageKind,
+        messageText: messageText,
+        timestamp: Date(),
+        timeZone: .current
+    )
+    print("Preview:")
+    print(preview.render())
 }
 
 struct CommonOptions {
@@ -405,6 +733,8 @@ struct InstallOptions {
     var dryRun = false
     var noBackup = false
     var skipResign = false
+    var runtimeTip = false
+    var runtimeDylibPath: String?
 
     var targetIdentifiers: [String] {
         if updateOnly {
@@ -412,6 +742,9 @@ struct InstallOptions {
         }
 
         var identifiers = [withTip ? "revoke-tip" : "revoke"]
+        if runtimeTip {
+            identifiers.append("runtime-tip")
+        }
         if multiInstance {
             identifiers.append("multiInstance")
         }
@@ -431,6 +764,13 @@ struct InstallOptions {
                 configPath = try parser.requiredValue(after: argument)
             case "--with-tip":
                 withTip = true
+            case "--runtime-tip":
+                runtimeTip = true
+                withTip = true
+            case "--runtime-dylib":
+                runtimeDylibPath = try parser.requiredValue(after: argument)
+                runtimeTip = true
+                withTip = true
             case "--multi-instance":
                 multiInstance = true
             case "--block-update":
@@ -449,11 +789,14 @@ struct InstallOptions {
             }
         }
 
-        if updateOnly && withTip {
-            throw ToolError.usage("--update-only 不能与 --with-tip 同时使用")
+        if updateOnly && runtimeTip {
+            throw ToolError.usage("--update-only 不能与 --runtime-tip 同时使用")
         }
         if updateOnly && multiInstance {
             throw ToolError.usage("--update-only 不能与 --multi-instance 同时使用")
+        }
+        if updateOnly && withTip {
+            throw ToolError.usage("--update-only 不能与 --with-tip 同时使用")
         }
     }
 }
@@ -659,6 +1002,343 @@ final class MachOPatcher {
     }
 }
 
+final class MachODylibInjector {
+    private let fileURL: URL
+
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
+
+    func inject(installName: String, arch: CPUArch, dryRun: Bool) throws -> [DylibInjectionReport] {
+        var data = try Data(contentsOf: fileURL)
+        let reports = try inject(installName: installName, arch: arch, dryRun: dryRun, data: &data)
+
+        if !dryRun && reports.contains(where: { $0.status == .injected }) {
+            let handle = try FileHandle(forWritingTo: fileURL)
+            defer {
+                try? handle.close()
+            }
+            try handle.seek(toOffset: 0)
+            handle.write(data)
+        }
+
+        return reports
+    }
+
+    private func inject(
+        installName: String,
+        arch: CPUArch,
+        dryRun: Bool,
+        data: inout Data
+    ) throws -> [DylibInjectionReport] {
+        guard data.count >= 4 else {
+            throw ToolError.unsupportedMachO(fileURL.path)
+        }
+
+        let nativeMagic = data.leUInt32(at: 0)
+        let bigEndianMagic = data.beUInt32(at: 0)
+
+        if bigEndianMagic == fatMagic || bigEndianMagic == fatMagic64 {
+            return try injectFat(
+                installName: installName,
+                arch: arch,
+                is64BitFat: bigEndianMagic == fatMagic64,
+                dryRun: dryRun,
+                data: &data
+            )
+        }
+
+        if nativeMagic == mhMagic64 {
+            guard let report = try injectThin(
+                installName: installName,
+                arch: arch,
+                machOffset: 0,
+                dryRun: dryRun,
+                data: &data
+            ) else {
+                throw ToolError.noMatchingSlice(fileURL.path)
+            }
+            return [report]
+        }
+
+        throw ToolError.unsupportedMachO(fileURL.path)
+    }
+
+    private func injectFat(
+        installName: String,
+        arch: CPUArch,
+        is64BitFat: Bool,
+        dryRun: Bool,
+        data: inout Data
+    ) throws -> [DylibInjectionReport] {
+        let nfat = Int(data.beUInt32(at: 4))
+        var offset = 8
+        var reports: [DylibInjectionReport] = []
+
+        for _ in 0..<nfat {
+            let length = is64BitFat ? 32 : 20
+            let cpuType = Int32(bitPattern: data.beUInt32(at: offset))
+            let sliceOffset = is64BitFat ? data.beUInt64(at: offset + 8) : UInt64(data.beUInt32(at: offset + 8))
+            offset += length
+
+            guard cpuType == arch.cpuType else {
+                continue
+            }
+
+            if let report = try injectThin(
+                installName: installName,
+                arch: arch,
+                machOffset: Int(sliceOffset),
+                dryRun: dryRun,
+                data: &data
+            ) {
+                reports.append(report)
+            }
+        }
+
+        if reports.isEmpty {
+            throw ToolError.noMatchingSlice(fileURL.path)
+        }
+
+        return reports
+    }
+
+    private func injectThin(
+        installName: String,
+        arch: CPUArch,
+        machOffset: Int,
+        dryRun: Bool,
+        data: inout Data
+    ) throws -> DylibInjectionReport? {
+        guard data.leUInt32(at: machOffset) == mhMagic64 else {
+            throw ToolError.unsupportedMachO(fileURL.path)
+        }
+
+        let cpuType = Int32(bitPattern: data.leUInt32(at: machOffset + 4))
+        guard cpuType == arch.cpuType else {
+            return nil
+        }
+
+        let ncmds = Int(data.leUInt32(at: machOffset + 16))
+        let sizeofcmds = Int(data.leUInt32(at: machOffset + 20))
+        let commandStart = machOffset + 32
+        let insertionOffset = commandStart + sizeofcmds
+
+        var commandOffset = commandStart
+        var firstContentOffset = Int.max
+        for _ in 0..<ncmds {
+            let cmd = data.leUInt32(at: commandOffset)
+            let cmdsize = Int(data.leUInt32(at: commandOffset + 4))
+            guard cmdsize > 0 else {
+                throw ToolError.unsupportedMachO(fileURL.path)
+            }
+
+            if cmd == lcLoadDylib {
+                let nameOffset = Int(data.leUInt32(at: commandOffset + 8))
+                let start = commandOffset + nameOffset
+                let end = (start..<(commandOffset + cmdsize)).first { data[$0] == 0 } ?? commandOffset + cmdsize
+                let existingName = String(data: data[start..<end], encoding: .utf8)
+                if existingName == installName {
+                    return DylibInjectionReport(
+                        arch: arch,
+                        installName: installName,
+                        commandOffset: UInt64(commandOffset),
+                        paddingLeft: UInt64(firstContentOffset == Int.max ? 0 : max(0, firstContentOffset - insertionOffset)),
+                        status: .alreadyInjected
+                    )
+                }
+            }
+
+            if cmd == lcSegment64 {
+                let sliceRelativeContentOffset = firstSectionOffset(commandOffset: commandOffset, data: data)
+                if sliceRelativeContentOffset != Int.max {
+                    firstContentOffset = min(firstContentOffset, machOffset + sliceRelativeContentOffset)
+                }
+            }
+
+            commandOffset += cmdsize
+        }
+
+        guard firstContentOffset != Int.max else {
+            throw ToolError.invalidConfig("无法计算 \(fileURL.path) 的 Mach-O header padding")
+        }
+
+        let commandData = makeLoadDylibCommand(installName: installName)
+        let availablePadding = firstContentOffset - insertionOffset
+        guard commandData.count <= availablePadding else {
+            throw ToolError.invalidConfig(
+                "\(fileURL.lastPathComponent) 的 Mach-O header padding 不足，至少需要 \(commandData.count) 字节，实际只有 \(availablePadding) 字节"
+            )
+        }
+
+        let report = DylibInjectionReport(
+            arch: arch,
+            installName: installName,
+            commandOffset: UInt64(insertionOffset),
+            paddingLeft: UInt64(availablePadding - commandData.count),
+            status: dryRun ? .wouldInject : .injected
+        )
+
+        guard !dryRun else {
+            return report
+        }
+
+        data.replaceSubrange(insertionOffset..<(insertionOffset + commandData.count), with: commandData)
+        data.setLEUInt32(UInt32(ncmds + 1), at: machOffset + 16)
+        data.setLEUInt32(UInt32(sizeofcmds + commandData.count), at: machOffset + 20)
+        return report
+    }
+
+    private func firstSectionOffset(commandOffset: Int, data: Data) -> Int {
+        let nsects = Int(data.leUInt32(at: commandOffset + 64))
+        guard nsects > 0 else {
+            let fileoff = Int(data.leUInt64(at: commandOffset + 40))
+            return fileoff > 0 ? fileoff : Int.max
+        }
+
+        var result = Int.max
+        var sectionOffset = commandOffset + 72
+        for _ in 0..<nsects {
+            let offset = Int(data.leUInt32(at: sectionOffset + 48))
+            if offset > 0 {
+                result = min(result, offset)
+            }
+            sectionOffset += 80
+        }
+        return result
+    }
+
+    private func makeLoadDylibCommand(installName: String) -> Data {
+        var data = Data()
+        let pathBytes = Array(installName.utf8) + [0]
+        let commandSize = alignedTo8(24 + pathBytes.count)
+
+        data.append(contentsOf: littleEndianBytes(lcLoadDylib))
+        data.append(contentsOf: littleEndianBytes(UInt32(commandSize)))
+        data.append(contentsOf: littleEndianBytes(UInt32(24)))
+        data.append(contentsOf: littleEndianBytes(UInt32(2)))
+        data.append(contentsOf: littleEndianBytes(UInt32(0)))
+        data.append(contentsOf: littleEndianBytes(UInt32(0)))
+        data.append(contentsOf: pathBytes)
+
+        if data.count < commandSize {
+            data.append(contentsOf: Array(repeating: 0, count: commandSize - data.count))
+        }
+
+        return data
+    }
+
+    private func alignedTo8(_ value: Int) -> Int {
+        (value + 7) & ~7
+    }
+
+    private func littleEndianBytes(_ value: UInt32) -> [UInt8] {
+        [
+            UInt8(value & 0xff),
+            UInt8((value >> 8) & 0xff),
+            UInt8((value >> 16) & 0xff),
+            UInt8((value >> 24) & 0xff)
+        ]
+    }
+}
+
+struct RuntimeTipInstaller {
+    static let dylibFileName = "libWeChatAntiRecallRuntime.dylib"
+    static let installName = "@loader_path/\(dylibFileName)"
+    static let hostBinaryPath = "Contents/Resources/wechat.dylib"
+    static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
+    static let supportedBuildVersion = "268597"
+
+    let sourceDylibURL: URL
+    let destinationDylibURL: URL
+    let hostBinaryURL: URL
+
+    var destinationDylibRelativePath: String {
+        Self.destinationDylibPath
+    }
+
+    init(appInfo: AppInfo, options: InstallOptions) throws {
+        guard options.runtimeTip else {
+            throw ToolError.invalidConfig("runtime-tip 未启用")
+        }
+        guard appInfo.buildVersion == Self.supportedBuildVersion else {
+            throw ToolError.invalidConfig(
+                "runtime-tip 目前只支持微信构建号 \(Self.supportedBuildVersion)，当前构建号是 \(appInfo.buildVersion)"
+            )
+        }
+
+        sourceDylibURL = try Self.resolveSourceDylibURL(path: options.runtimeDylibPath)
+        destinationDylibURL = appInfo.appURL.appendingPathComponent(Self.destinationDylibPath)
+        hostBinaryURL = appInfo.appURL.appendingPathComponent(Self.hostBinaryPath)
+    }
+
+    func install(dryRun: Bool) throws -> [DylibInjectionReport] {
+        let reports = try MachODylibInjector(fileURL: hostBinaryURL).inject(
+            installName: Self.installName,
+            arch: .arm64,
+            dryRun: true
+        )
+
+        guard !dryRun else {
+            return reports
+        }
+
+        try copyRuntimeDylib()
+        return try MachODylibInjector(fileURL: hostBinaryURL).inject(
+            installName: Self.installName,
+            arch: .arm64,
+            dryRun: false
+        )
+    }
+
+    private static func resolveSourceDylibURL(path: String?) throws -> URL {
+        let fileManager = FileManager.default
+        if let path {
+            let url = URL(fileURLWithPath: path)
+            guard fileManager.isReadableFile(atPath: url.path) else {
+                throw ToolError.invalidConfig("找不到 runtime dylib：\(path)")
+            }
+            return url
+        }
+
+        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let workingDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        let candidates = [
+            executableDirectory.appendingPathComponent(Self.dylibFileName),
+            workingDirectory.appendingPathComponent(".build/release/\(Self.dylibFileName)"),
+            workingDirectory.appendingPathComponent(".build/debug/\(Self.dylibFileName)"),
+            workingDirectory.appendingPathComponent(".build/arm64-apple-macosx/release/\(Self.dylibFileName)"),
+            workingDirectory.appendingPathComponent(".build/arm64-apple-macosx/debug/\(Self.dylibFileName)")
+        ]
+
+        if let url = candidates.first(where: { fileManager.isReadableFile(atPath: $0.path) }) {
+            return url
+        }
+
+        throw ToolError.usage("找不到 \(Self.dylibFileName)，请先运行 swift build -c release，或使用 --runtime-dylib <path>")
+    }
+
+    private func copyRuntimeDylib() throws {
+        let fileManager = FileManager.default
+        do {
+            try fileManager.createDirectory(
+                at: destinationDylibURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            if fileManager.fileExists(atPath: destinationDylibURL.path) {
+                try fileManager.removeItem(at: destinationDylibURL)
+            }
+            try fileManager.copyItem(at: sourceDylibURL, to: destinationDylibURL)
+        } catch {
+            throw ToolError.fileOperationFailed(
+                operation: "安装 runtime dylib",
+                path: destinationDylibURL.path,
+                underlying: error.localizedDescription
+            )
+        }
+    }
+}
+
 private func loadConfigs(path: String?) throws -> [VersionConfig] {
     let configURL = try resolveConfigURL(path: path)
     let data = try Data(contentsOf: configURL)
@@ -730,7 +1410,12 @@ private func configForInstalledApp(_ appInfo: AppInfo, configs: [VersionConfig])
     throw ToolError.unsupportedVersion(found: appInfo.buildVersion, supported: configs.map(\.version))
 }
 
-private func validateInstallPermissions(appInfo: AppInfo, targets: [PatchTarget], options: InstallOptions) throws {
+private func validateInstallPermissions(
+    appInfo: AppInfo,
+    targets: [PatchTarget],
+    options: InstallOptions,
+    runtimeInstaller: RuntimeTipInstaller?
+) throws {
     guard !options.dryRun else {
         return
     }
@@ -746,6 +1431,14 @@ private func validateInstallPermissions(appInfo: AppInfo, targets: [PatchTarget]
         if !options.noBackup {
             try requireDirectoryWritable(binaryURL.deletingLastPathComponent(), operation: "在目标目录创建备份")
         }
+    }
+
+    if let runtimeInstaller {
+        try requireWritable(runtimeInstaller.hostBinaryURL, operation: "注入 runtime 到目标二进制")
+        try requireDirectoryWritable(
+            runtimeInstaller.destinationDylibURL.deletingLastPathComponent(),
+            operation: "安装 runtime dylib"
+        )
     }
 
     if !options.skipResign {
@@ -989,5 +1682,12 @@ extension Data {
             value = (value << 8) | UInt64(self[offset + byteIndex])
         }
         return value
+    }
+
+    mutating func setLEUInt32(_ value: UInt32, at offset: Int) {
+        self[offset] = UInt8(value & 0xff)
+        self[offset + 1] = UInt8((value >> 8) & 0xff)
+        self[offset + 2] = UInt8((value >> 16) & 0xff)
+        self[offset + 3] = UInt8((value >> 24) & 0xff)
     }
 }
