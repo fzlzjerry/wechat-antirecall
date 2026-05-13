@@ -463,5 +463,153 @@
         ]
       }
     ]
+  },
+  {
+    "version": "268599",
+    "targets": [
+      {
+        "identifier": "revoke",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "477783c",
+            "expected": "E00F0034",
+            "asm": "7F000014"
+          }
+        ]
+      },
+      {
+        "identifier": "revoke-tip",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "477783c",
+            "expected": [
+              "E00F0034",
+              "7F000014"
+            ],
+            "asm": "E00F0034"
+          },
+          {
+            "arch": "arm64",
+            "addr": "4777fd0",
+            "expected": "60B600F9",
+            "asm": "7FB600F9"
+          }
+        ]
+      },
+      {
+        "identifier": "update",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "1c6f2c",
+            "expected": "FC6FBBA9",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1c9148",
+            "expected": "FFC305D1",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1c9418",
+            "expected": "FF4301D1",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1c9840",
+            "expected": "F657BDA9",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1cb9ec",
+            "expected": "FFC305D1",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1d0514",
+            "expected": "00604039C0035FD6",
+            "asm": "00008052C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1d051c",
+            "expected": "02600039",
+            "asm": "C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1d0524",
+            "expected": "00644039C0035FD6",
+            "asm": "00008052C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1d052c",
+            "expected": "02640039",
+            "asm": "C0035FD6"
+          }
+        ]
+      },
+      {
+        "identifier": "multiInstance",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "10001f784",
+            "expected": [
+              "FF8306D1F65717A9",
+              "00008052C0035FD6"
+            ],
+            "asm": "00008052C0035FD6"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100026a78",
+            "expected": [
+              "13008012",
+              "13008052"
+            ],
+            "asm": "13008052"
+          },
+          {
+            "arch": "arm64",
+            "addr": "1000271d0",
+            "expected": [
+              "13008012",
+              "13008052"
+            ],
+            "asm": "13008052"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100026c38",
+            "expected": [
+              "F30300AA",
+              "F3031FAA"
+            ],
+            "asm": "F3031FAA"
+          },
+          {
+            "arch": "arm64",
+            "addr": "100026c3c",
+            "expected": [
+              "80160034",
+              "B4000014"
+            ],
+            "asm": "B4000014"
+          }
+        ]
+      }
+    ]
   }
 ]

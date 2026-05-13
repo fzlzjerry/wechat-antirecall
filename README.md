@@ -12,13 +12,13 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 | 31927, 31960, 32281, 32288, 34371 | arm64 | `Contents/MacOS/WeChat` |
 | 34817 | x86_64 | `Contents/MacOS/WeChat` |
 | 36559 | x86_64 | `Contents/Frameworks/wechat.dylib` |
-| 268575 | arm64 | `multiInstance` 在 `Contents/MacOS/WeChat` |
-| 268575, 268596, 268597 | arm64 | `Contents/Resources/wechat.dylib` |
-| 268597 | arm64 | 自定义撤回提示运行时 `--runtime-tip` |
+| 268575, 268599 | arm64 | `multiInstance` 在 `Contents/MacOS/WeChat` |
+| 268575, 268596, 268597, 268599 | arm64 | `Contents/Resources/wechat.dylib` |
+| 268597, 268599 | arm64 | 自定义撤回提示运行时 `--runtime-tip` |
 
-> **268575 / 268596 / 268597（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
+> **268575 / 268596 / 268597 / 268599（微信 4.1.9）** 的补丁目标在 `wechat.dylib`，不是主二进制。该 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信。
 
-> **268575（微信 4.1.9）** 的 `multiInstance` 目标在主二进制 `Contents/MacOS/WeChat`。其中 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信
+> **268575 / 268599（微信 4.1.9）** 的 `multiInstance` 目标在主二进制 `Contents/MacOS/WeChat`。其中 dylib 不会被 `codesign --deep` 自动作为嵌套代码处理，工具会先单独重签被 patch 的 dylib，再重签整个 app，否则运行到撤回消息所在代码页时 macOS 会以 `Code Signature Invalid` 杀掉微信
 
 ## 补丁模式
 
@@ -26,9 +26,9 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 
 **提示模式（`--with-tip`）**：不跳过 `revokemsg` 解析，让微信继续读取 `replacemsg` 撤回提示，同时把撤回包里的 `newmsgid` 清零，阻止微信按原消息 SvrID 删除已有消息。效果与 BetterWX/WeChatTweak 的"保留提示、阻断删除"策略一致。
 
-**自定义撤回提示短语（`tip-phrase` + `--runtime-tip`）**：提供 X1a0He 风格的短语配置入口，支持 `{from}` 占位符和本地预览。`tip-phrase` 写入当前登录用户的 WeChat 容器偏好文件，请用普通用户执行，不要用 `sudo`。`--runtime-tip` 会把运行时 dylib 安装到 `Contents/Resources`，并给 `wechat.dylib` 注入 `LC_LOAD_DYLIB`，让撤回提示改用配置短语；目前只支持构建号 `268597`。
+**自定义撤回提示短语（`tip-phrase` + `--runtime-tip`）**：提供 X1a0He 风格的短语配置入口，支持 `{from}` 占位符和本地预览。`tip-phrase` 写入当前登录用户的 WeChat 容器偏好文件，请用普通用户执行，不要用 `sudo`。`--runtime-tip` 会把运行时 dylib 安装到 `Contents/Resources`，并给 `wechat.dylib` 注入 `LC_LOAD_DYLIB`，让撤回提示改用配置短语；目前支持构建号 `268597` / `268599`。
 
-**无限多开（`--multi-instance`）**：绕过微信 4.1.9 进程互斥检查，允许同时启动多个客户端实例（当前仅 `268575` 提供该目标）。
+**无限多开（`--multi-instance`）**：绕过微信 4.1.9 进程互斥检查，允许同时启动多个客户端实例（当前支持 `268575` / `268599`）。
 
 <u>使用方法：选择带有多开参数的命令安装后，使用命令 `open -n /Applications/WeChat.app` 或者 使用多开启动器： [WeChatMulti](https://github.com/loohalh/WeChatMulti)</u>
 
@@ -120,7 +120,7 @@ sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
 # 提示模式
 sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app
 
-# 自定义撤回提示短语（仅 268597）
+# 自定义撤回提示短语（仅 268597 / 268599）
 sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app
 
 # 提示模式 + 多开
@@ -214,9 +214,9 @@ sudo .build/release/wechat-antirecall restore \
 
 `expected` 支持单个十六进制字符串或字符串数组；提示模式会同时接受"原始字节"和"已装过静默补丁的字节"，支持直接在两种模式间切换而无需先恢复备份。
 
-`multiInstance` 目标目前只覆盖 `268575`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。
+`multiInstance` 目标目前覆盖 `268575` / `268599`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。
 
-`update` 目标目前覆盖 `268575` / `268596` / `268597`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
+`update` 目标目前覆盖 `268575` / `268596` / `268597` / `268599`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
 
 显式请求 `--with-tip` 或 `--block-update` 时，当前构建号必须提供对应的 `revoke-tip` 或 `update` 目标；工具会拒绝静默降级成其他模式。
 

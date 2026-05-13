@@ -106,6 +106,43 @@ final class MachODylibInjectorTests: XCTestCase {
         XCTAssertTrue(try loadDylibCommands(in: hostBinaryURL).contains(RuntimeTipInstaller.installName))
     }
 
+    func testRuntimeInstallerCopiesDylibAndInjectsHostBinaryForBuild268599() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechat-antirecall-runtime-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let resourcesURL = directory
+            .appendingPathComponent("WeChat.app/Contents/Resources", isDirectory: true)
+        try FileManager.default.createDirectory(at: resourcesURL, withIntermediateDirectories: true)
+
+        let hostBinaryURL = resourcesURL.appendingPathComponent("wechat.dylib")
+        try Data(contentsOf: try makeTemporaryMachO()).write(to: hostBinaryURL)
+
+        let sourceDylibURL = directory.appendingPathComponent(RuntimeTipInstaller.dylibFileName)
+        try Data([0xca, 0xfe, 0xba, 0xbe]).write(to: sourceDylibURL)
+
+        let appInfo = AppInfo(
+            appURL: directory.appendingPathComponent("WeChat.app"),
+            executableURL: directory.appendingPathComponent("WeChat.app/Contents/MacOS/WeChat"),
+            shortVersion: "4.1.9",
+            buildVersion: "268599",
+            bundleIdentifier: "com.tencent.xinWeChat"
+        )
+        let options = try InstallOptions(["--runtime-dylib", sourceDylibURL.path])
+
+        let installer = try RuntimeTipInstaller(appInfo: appInfo, options: options)
+        let reports = try installer.install(dryRun: false)
+
+        XCTAssertEqual(reports.map(\.status), [.injected])
+        XCTAssertEqual(
+            try Data(contentsOf: resourcesURL.appendingPathComponent(RuntimeTipInstaller.dylibFileName)),
+            try Data(contentsOf: sourceDylibURL)
+        )
+        XCTAssertTrue(try loadDylibCommands(in: hostBinaryURL).contains(RuntimeTipInstaller.installName))
+    }
+
     func testRuntimeInstallerRejectsUnsupportedBuildVersion() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wechat-antirecall-runtime-\(UUID().uuidString)", isDirectory: true)
@@ -129,7 +166,7 @@ final class MachODylibInjectorTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeTipInstaller(appInfo: appInfo, options: options)) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597，当前构建号是 268596"
+                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597, 268599，当前构建号是 268596"
             )
         }
     }
