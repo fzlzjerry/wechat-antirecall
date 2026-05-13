@@ -15,18 +15,137 @@
 
 namespace {
 
-constexpr uintptr_t parseRevokeXMLHookSlot = 0x92da2c0;
-constexpr uintptr_t parseRevokeXMLOriginalBody = 0x4764540;
-constexpr ptrdiff_t revokeNewMsgIdOffset = 0x168;
-constexpr ptrdiff_t revokeReplaceMsgOffset = 0x170;
 constexpr NSUInteger revokeTipMaximumLength = 120;
 constexpr size_t revokeTimeCacheMaximumCount = 512;
+
+struct RevokeHookConfig {
+    const char *buildVersion;
+    uintptr_t parseRevokeXMLOriginalBody;
+    ptrdiff_t revokeNewMsgIdOffset;
+    ptrdiff_t revokeReplaceMsgOffset;
+};
+
+constexpr RevokeHookConfig revokeHookConfigs[] = {
+    {"268597", 0x4764540, 0x168, 0x170},
+    {"268599", 0x47775cc, 0x168, 0x170},
+};
 
 using ParseRevokeXML = bool (*)(void *, std::string *, void *, uint32_t);
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
 std::mutex revokeTimeCacheMutex;
 std::unordered_map<std::string, std::string> revokeTimeCache;
+
+NSString *mainBundleBuildVersion() {
+    @autoreleasepool {
+        id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
+        return [value isKindOfClass:[NSString class]] ? static_cast<NSString *>(value) : nil;
+    }
+}
+
+const RevokeHookConfig *revokeHookConfigForBuildVersion(NSString *buildVersion) {
+    if (buildVersion == nil) {
+        return nullptr;
+    }
+
+    const char *utf8 = [buildVersion UTF8String];
+    if (utf8 == nullptr) {
+        return nullptr;
+    }
+
+    for (const auto &config : revokeHookConfigs) {
+        if (std::strcmp(config.buildVersion, utf8) == 0) {
+            return &config;
+        }
+    }
+
+    return nullptr;
+}
+
+const RevokeHookConfig *currentRevokeHookConfig() {
+    return revokeHookConfigForBuildVersion(mainBundleBuildVersion());
+}
+
+bool decodeADRPPage(uint32_t instruction, uintptr_t instructionAddress, uintptr_t &pageAddress) {
+    if ((instruction & 0x9F000000) != 0x90000000) {
+        return false;
+    }
+
+    int64_t imm = static_cast<int64_t>(((instruction >> 5) & 0x7ffff) << 2 | ((instruction >> 29) & 0x3));
+    if ((imm & (1 << 20)) != 0) {
+        imm -= (1 << 21);
+    }
+
+    pageAddress = (instructionAddress & ~static_cast<uintptr_t>(0xfff)) + (static_cast<uintptr_t>(imm) << 12);
+    return true;
+}
+
+bool decodeLDRUnsignedImmediate64(uint32_t instruction, uint32_t &targetRegister, uint32_t &baseRegister, uintptr_t &offset) {
+    if ((instruction & 0xFFC00000) != 0xF9400000) {
+        return false;
+    }
+
+    targetRegister = instruction & 0x1f;
+    baseRegister = (instruction >> 5) & 0x1f;
+    offset = static_cast<uintptr_t>((instruction >> 10) & 0xfff) << 3;
+    return true;
+}
+
+bool decodeCBZTarget64(uint32_t instruction, uintptr_t instructionAddress, uint32_t &targetRegister, uintptr_t &targetAddress) {
+    if ((instruction & 0xFF000000) != 0xB4000000) {
+        return false;
+    }
+
+    int64_t imm = static_cast<int64_t>((instruction >> 5) & 0x7ffff);
+    if ((imm & (1 << 18)) != 0) {
+        imm -= (1 << 19);
+    }
+
+    targetRegister = instruction & 0x1f;
+    targetAddress = instructionAddress + static_cast<uintptr_t>(imm << 2);
+    return true;
+}
+
+bool isBranchRegister(uint32_t instruction, uint32_t targetRegister) {
+    return instruction == (0xD61F0000 | (targetRegister << 5));
+}
+
+uintptr_t resolveParseRevokeXMLHookSlot(uintptr_t originalBodyAddress) {
+    if (originalBodyAddress < 16) {
+        return 0;
+    }
+
+    const uintptr_t stubAddress = originalBodyAddress - 16;
+    const auto *instructions = reinterpret_cast<const uint32_t *>(stubAddress);
+
+    uintptr_t pageAddress = 0;
+    if (!decodeADRPPage(instructions[0], stubAddress, pageAddress)) {
+        return 0;
+    }
+
+    uint32_t ldrTargetRegister = 0;
+    uint32_t ldrBaseRegister = 0;
+    uintptr_t ldrOffset = 0;
+    if (!decodeLDRUnsignedImmediate64(instructions[1], ldrTargetRegister, ldrBaseRegister, ldrOffset)) {
+        return 0;
+    }
+
+    uintptr_t cbzTarget = 0;
+    uint32_t cbzRegister = 0;
+    if (!decodeCBZTarget64(instructions[2], stubAddress + 8, cbzRegister, cbzTarget)) {
+        return 0;
+    }
+
+    if (ldrTargetRegister != ldrBaseRegister || cbzRegister != ldrTargetRegister || cbzTarget != originalBodyAddress) {
+        return 0;
+    }
+
+    if (!isBranchRegister(instructions[3], ldrTargetRegister)) {
+        return 0;
+    }
+
+    return pageAddress + ldrOffset;
+}
 
 std::string trimCopy(const std::string &value) {
     const char *whitespace = " \t\r\n\"'";
@@ -633,13 +752,18 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
         return false;
     }
 
+    const auto *hookConfig = currentRevokeHookConfig();
+    if (hookConfig == nullptr) {
+        return false;
+    }
+
     const bool result = originalParseRevokeXML(message, xml, flag, msgType);
     if (!result || message == nullptr) {
         return result;
     }
 
-    auto *newMsgId = reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(message) + revokeNewMsgIdOffset);
-    auto *replaceMsg = reinterpret_cast<std::string *>(reinterpret_cast<uint8_t *>(message) + revokeReplaceMsgOffset);
+    auto *newMsgId = reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(message) + hookConfig->revokeNewMsgIdOffset);
+    auto *replaceMsg = reinterpret_cast<std::string *>(reinterpret_cast<uint8_t *>(message) + hookConfig->revokeReplaceMsgOffset);
     const uint64_t originalNewMsgId = *newMsgId;
     const std::string originalReplaceMsg = *replaceMsg;
 
@@ -696,17 +820,28 @@ bool writeHookSlot(void **slot, void *replacement) {
 }
 
 void installRevokeTipHook() {
+    const auto *hookConfig = currentRevokeHookConfig();
+    if (hookConfig == nullptr) {
+        return;
+    }
+
     const uintptr_t slide = findWeChatDylibSlide();
     if (slide == 0) {
         return;
     }
 
-    auto **hookSlot = reinterpret_cast<void **>(slide + parseRevokeXMLHookSlot);
+    const uintptr_t originalBodyAddress = slide + hookConfig->parseRevokeXMLOriginalBody;
+    const uintptr_t hookSlotAddress = resolveParseRevokeXMLHookSlot(originalBodyAddress);
+    if (hookSlotAddress == 0) {
+        return;
+    }
+
+    auto **hookSlot = reinterpret_cast<void **>(hookSlotAddress);
     if (*hookSlot == reinterpret_cast<void *>(&hookedParseRevokeXML)) {
         return;
     }
 
-    originalParseRevokeXML = reinterpret_cast<ParseRevokeXML>(slide + parseRevokeXMLOriginalBody);
+    originalParseRevokeXML = reinterpret_cast<ParseRevokeXML>(originalBodyAddress);
     writeHookSlot(hookSlot, reinterpret_cast<void *>(&hookedParseRevokeXML));
 }
 

@@ -106,6 +106,43 @@ final class MachODylibInjectorTests: XCTestCase {
         XCTAssertTrue(try loadDylibCommands(in: hostBinaryURL).contains(RuntimeTipInstaller.installName))
     }
 
+    func testRuntimeInstallerCopiesDylibAndInjectsHostBinaryForBuild268599() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechat-antirecall-runtime-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let resourcesURL = directory
+            .appendingPathComponent("WeChat.app/Contents/Resources", isDirectory: true)
+        try FileManager.default.createDirectory(at: resourcesURL, withIntermediateDirectories: true)
+
+        let hostBinaryURL = resourcesURL.appendingPathComponent("wechat.dylib")
+        try Data(contentsOf: try makeTemporaryMachO()).write(to: hostBinaryURL)
+
+        let sourceDylibURL = directory.appendingPathComponent(RuntimeTipInstaller.dylibFileName)
+        try Data([0xca, 0xfe, 0xba, 0xbe]).write(to: sourceDylibURL)
+
+        let appInfo = AppInfo(
+            appURL: directory.appendingPathComponent("WeChat.app"),
+            executableURL: directory.appendingPathComponent("WeChat.app/Contents/MacOS/WeChat"),
+            shortVersion: "4.1.9",
+            buildVersion: "268599",
+            bundleIdentifier: "com.tencent.xinWeChat"
+        )
+        let options = try InstallOptions(["--runtime-dylib", sourceDylibURL.path])
+
+        let installer = try RuntimeTipInstaller(appInfo: appInfo, options: options)
+        let reports = try installer.install(dryRun: false)
+
+        XCTAssertEqual(reports.map(\.status), [.injected])
+        XCTAssertEqual(
+            try Data(contentsOf: resourcesURL.appendingPathComponent(RuntimeTipInstaller.dylibFileName)),
+            try Data(contentsOf: sourceDylibURL)
+        )
+        XCTAssertTrue(try loadDylibCommands(in: hostBinaryURL).contains(RuntimeTipInstaller.installName))
+    }
+
     func testRuntimeInstallerRejectsUnsupportedBuildVersion() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wechat-antirecall-runtime-\(UUID().uuidString)", isDirectory: true)
@@ -129,7 +166,7 @@ final class MachODylibInjectorTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeTipInstaller(appInfo: appInfo, options: options)) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597，当前构建号是 268596"
+                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597, 268599，当前构建号是 268596"
             )
         }
     }
@@ -261,5 +298,114 @@ private extension Data {
         if bytes.count < length {
             append(contentsOf: Array(repeating: 0, count: length - bytes.count))
         }
+    }
+}
+
+
+final class CloneWorkflowTests: XCTestCase {
+    func testCloneOptionsDerivesDefaultOutputAndToken() throws {
+        let options = try CloneOptions(["--index", "3"])
+
+        XCTAssertEqual(options.cloneToken, "clone3")
+        XCTAssertEqual(
+            options.outputURL(for: URL(fileURLWithPath: "/Applications/WeChat.app")).path,
+            "/Applications/WeChat 3.app"
+        )
+    }
+
+    func testCloneOptionsAppendsAppExtensionToCustomOutput() throws {
+        let options = try CloneOptions(["--output", "/tmp/WeChat-Work"])
+
+        XCTAssertEqual(
+            options.outputURL(for: URL(fileURLWithPath: "/Applications/WeChat.app")).path,
+            "/tmp/WeChat-Work.app"
+        )
+    }
+
+    func testAppCloneRewriterRewritesBundlesForAppsExtensionsAndXPCs() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechat-antirecall-clone-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let appURL = directory.appendingPathComponent("WeChat 2.app", isDirectory: true)
+        try writePlist([
+            "CFBundleIdentifier": "com.tencent.xinWeChat",
+            "CFBundleExecutable": "WeChat",
+            "CFBundleShortVersionString": "4.1.9",
+            "CFBundleVersion": "268599"
+        ], to: appURL.appendingPathComponent("Contents/Info.plist"))
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.flue.WeChatAppEx"],
+            to: appURL.appendingPathComponent("Contents/MacOS/WeChatAppEx.app/Contents/Info.plist")
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.flue.helper"],
+            to: appURL.appendingPathComponent(
+                "Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework/Versions/C/Helpers/WeChatAppEx Helper.app/Contents/Info.plist"
+            )
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.xinWeChat.WeChatMacShare"],
+            to: appURL.appendingPathComponent("Contents/PlugIns/WeChatMacShare.appex/Contents/Info.plist")
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.xWechat.DebugHelper"],
+            to: appURL.appendingPathComponent("Contents/XPCServices/DebugHelper.xpc/Contents/Info.plist")
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "org.sparkle-project.Sparkle"],
+            to: appURL.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist")
+        )
+
+        let changes = try AppCloneRewriter(
+            appURL: appURL,
+            sourceMainBundleIdentifier: "com.tencent.xinWeChat",
+            cloneToken: "clone2"
+        ).rewrite()
+
+        XCTAssertEqual(changes.count, 5)
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/Info.plist")),
+            "com.tencent.xinWeChat.clone2"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/MacOS/WeChatAppEx.app/Contents/Info.plist")),
+            "com.tencent.flue.clone2.WeChatAppEx"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent(
+                "Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework/Versions/C/Helpers/WeChatAppEx Helper.app/Contents/Info.plist"
+            )),
+            "com.tencent.flue.clone2.helper"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/PlugIns/WeChatMacShare.appex/Contents/Info.plist")),
+            "com.tencent.xinWeChat.clone2.WeChatMacShare"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/XPCServices/DebugHelper.xpc/Contents/Info.plist")),
+            "com.tencent.xWechat.clone2.DebugHelper"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist")),
+            "org.sparkle-project.Sparkle"
+        )
+    }
+
+    private func writePlist(_ plist: [String: Any], to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
+        try data.write(to: url)
+    }
+
+    private func readBundleIdentifier(at url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        var format = PropertyListSerialization.PropertyListFormat.binary
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any]
+        )
+        return try XCTUnwrap(plist["CFBundleIdentifier"] as? String)
     }
 }

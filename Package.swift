@@ -26,5 +26,6 @@ let package = Package(
                 "WeChatAntiRecallRuntime"
             ]
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )
