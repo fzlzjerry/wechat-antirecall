@@ -180,6 +180,57 @@ bool hasPrefix(const std::string &value, const std::string &prefix) {
         value.compare(0, prefix.size(), prefix) == 0;
 }
 
+bool isDigit(char character) {
+    return character >= '0' && character <= '9';
+}
+
+bool isClockTextAt(const std::string &value, size_t position) {
+    return position + 5 <= value.size() &&
+        isDigit(value[position]) &&
+        isDigit(value[position + 1]) &&
+        value[position + 2] == ':' &&
+        isDigit(value[position + 3]) &&
+        isDigit(value[position + 4]);
+}
+
+size_t findTimeMarker(const std::string &value, size_t cursor) {
+    const std::string marker = " 于 ";
+    while (true) {
+        const auto position = value.find(marker, cursor);
+        if (position == std::string::npos) {
+            return std::string::npos;
+        }
+
+        if (isClockTextAt(value, position + marker.size())) {
+            return position;
+        }
+        cursor = position + marker.size();
+    }
+}
+
+std::string collapseDuplicateTimeMarkers(std::string value) {
+    const std::string marker = " 于 ";
+    size_t cursor = 0;
+
+    while (true) {
+        const auto first = findTimeMarker(value, cursor);
+        if (first == std::string::npos) {
+            return value;
+        }
+
+        const auto firstEnd = first + marker.size() + 5;
+        const auto second = findTimeMarker(value, firstEnd);
+        const auto revoke = value.find(" 撤回", firstEnd);
+        if (second != std::string::npos && (revoke == std::string::npos || second < revoke)) {
+            value.erase(second, marker.size() + 5);
+            cursor = firstEnd;
+            continue;
+        }
+
+        cursor = firstEnd;
+    }
+}
+
 bool isTargetWeChatDylibPath(const char *imageName) {
     if (imageName == nullptr) {
         return false;
@@ -206,6 +257,10 @@ std::string extractSenderName(const std::string &originalTip) {
     }
 
     return "";
+}
+
+bool looksLikeKnownRenderedTip(const std::string &tip) {
+    return hasPrefix(tip, "已拦截") && tip.find("撤回") != std::string::npos;
 }
 
 const std::vector<std::string> &revokeTipPlaceholders() {
@@ -275,7 +330,7 @@ std::string normalizeRenderedTip(const std::string &tip, const std::string &conf
     auto normalized = tip;
     const auto parts = literalPartsForTemplate(configuredPhrase);
     if (parts.size() <= 1 || parts.front().empty()) {
-        return normalized;
+        return collapseDuplicateTimeMarkers(normalized);
     }
 
     const auto &prefix = parts.front();
@@ -287,7 +342,7 @@ std::string normalizeRenderedTip(const std::string &tip, const std::string &conf
         normalized = candidate;
     }
 
-    return normalized;
+    return collapseDuplicateTimeMarkers(normalized);
 }
 
 std::string currentTimeText() {
@@ -416,6 +471,30 @@ std::string stableRevokeTimeText(
     return fallbackTime;
 }
 
+void replaceTimePlaceholder(std::string &rendered, const std::string &timeText) {
+    if (!timeText.empty()) {
+        replaceAll(rendered, "{time}", timeText);
+        return;
+    }
+
+    static const std::vector<std::string> emptyTimePatterns = {
+        " 于 {time}",
+        " 于{time}",
+        "于 {time}",
+        "于{time}",
+    };
+
+    for (const auto &pattern : emptyTimePatterns) {
+        const auto position = rendered.find(pattern);
+        if (position != std::string::npos) {
+            rendered.erase(position, pattern.size());
+            break;
+        }
+    }
+
+    replaceAll(rendered, "{time}", "");
+}
+
 std::string renderRevokeTip(
     const std::string &originalTip,
     const std::string &configuredPhrase,
@@ -428,10 +507,13 @@ std::string renderRevokeTip(
     if (matchesRenderedTemplate(originalTip, configuredPhrase)) {
         return normalizeRenderedTip(originalTip, configuredPhrase);
     }
+    if (looksLikeKnownRenderedTip(originalTip)) {
+        return collapseDuplicateTimeMarkers(originalTip);
+    }
 
     auto rendered = configuredPhrase;
     replaceAll(rendered, "{from}", extractSenderName(originalTip));
-    replaceAll(rendered, "{time}", timeText);
+    replaceTimePlaceholder(rendered, timeText);
     return rendered;
 }
 

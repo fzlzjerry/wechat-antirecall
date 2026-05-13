@@ -45,21 +45,18 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(second, "已拦截 Benjamin 于 00:42 撤回的一条消息")
     }
 
-    func testUsesIndependentFallbackTimeForDifferentRevokeEvents() throws {
+    func testUsesXmlTimestampInsteadOfFallbackTime() throws {
         wechat_antirecall_clear_revoke_tip_time_cache()
         defer {
             wechat_antirecall_clear_revoke_tip_time_cache()
         }
 
         let phrase = "已拦截 {from} 于 {time} 撤回的一条消息"
+        let xml = "<sysmsg><revokemsg><createtime>1715563800</createtime></revokemsg></sysmsg>"
 
         XCTAssertEqual(
-            try renderEvent(original: "Benjamin撤回了一条消息", phrase: phrase, newMsgId: 42, xml: nil, fallbackTime: "00:42"),
-            "已拦截 Benjamin 于 00:42 撤回的一条消息"
-        )
-        XCTAssertEqual(
-            try renderEvent(original: "Aida撤回了一条消息", phrase: phrase, newMsgId: 43, xml: nil, fallbackTime: "00:43"),
-            "已拦截 Aida 于 00:43 撤回的一条消息"
+            try renderEvent(original: "Benjamin撤回了一条消息", phrase: phrase, newMsgId: 42, xml: xml, fallbackTime: "09:32"),
+            "已拦截 Benjamin 于 09:30 撤回的一条消息"
         )
     }
 
@@ -77,6 +74,16 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(try render(original: rendered, phrase: phrase), rendered)
     }
 
+    func testRepeatedRuntimeRewriteWithTimeDoesNotNestRenderedPhrase() throws {
+        let phrase = "已拦截 {from} 于 {time} 撤回的一条消息"
+        let rendered = "已拦截 molder 于 09:30 撤回的一条消息"
+
+        XCTAssertEqual(
+            try renderEvent(original: rendered, phrase: phrase, newMsgId: 0, xml: nil, fallbackTime: "09:32"),
+            rendered
+        )
+    }
+
     func testRenderingCollapsesPreviouslyDuplicatedPrefix() throws {
         let rendered = try render(
             original: "已拦截 已拦截 Benjamin 撤回的一条消息",
@@ -84,6 +91,15 @@ final class RuntimeRewriteTests: XCTestCase {
         )
 
         XCTAssertEqual(rendered, "已拦截 Benjamin 撤回的一条消息")
+    }
+
+    func testRenderingCollapsesNestedRuntimeTipWithTime() throws {
+        let rendered = try render(
+            original: "已拦截 已拦截 molder 于 09:30 于 09:32 撤回的一条消息",
+            phrase: "已拦截 {from} 于 {time} 撤回的一条消息"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 molder 于 09:30 撤回的一条消息")
     }
 
     func testRendersConfiguredPhraseWithoutSenderWhenSenderIsUnknown() throws {
