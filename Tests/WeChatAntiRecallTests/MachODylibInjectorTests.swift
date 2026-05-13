@@ -300,3 +300,112 @@ private extension Data {
         }
     }
 }
+
+
+final class CloneWorkflowTests: XCTestCase {
+    func testCloneOptionsDerivesDefaultOutputAndToken() throws {
+        let options = try CloneOptions(["--index", "3"])
+
+        XCTAssertEqual(options.cloneToken, "clone3")
+        XCTAssertEqual(
+            options.outputURL(for: URL(fileURLWithPath: "/Applications/WeChat.app")).path,
+            "/Applications/WeChat 3.app"
+        )
+    }
+
+    func testCloneOptionsAppendsAppExtensionToCustomOutput() throws {
+        let options = try CloneOptions(["--output", "/tmp/WeChat-Work"])
+
+        XCTAssertEqual(
+            options.outputURL(for: URL(fileURLWithPath: "/Applications/WeChat.app")).path,
+            "/tmp/WeChat-Work.app"
+        )
+    }
+
+    func testAppCloneRewriterRewritesBundlesForAppsExtensionsAndXPCs() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechat-antirecall-clone-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+        }
+
+        let appURL = directory.appendingPathComponent("WeChat 2.app", isDirectory: true)
+        try writePlist([
+            "CFBundleIdentifier": "com.tencent.xinWeChat",
+            "CFBundleExecutable": "WeChat",
+            "CFBundleShortVersionString": "4.1.9",
+            "CFBundleVersion": "268599"
+        ], to: appURL.appendingPathComponent("Contents/Info.plist"))
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.flue.WeChatAppEx"],
+            to: appURL.appendingPathComponent("Contents/MacOS/WeChatAppEx.app/Contents/Info.plist")
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.flue.helper"],
+            to: appURL.appendingPathComponent(
+                "Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework/Versions/C/Helpers/WeChatAppEx Helper.app/Contents/Info.plist"
+            )
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.xinWeChat.WeChatMacShare"],
+            to: appURL.appendingPathComponent("Contents/PlugIns/WeChatMacShare.appex/Contents/Info.plist")
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "com.tencent.xWechat.DebugHelper"],
+            to: appURL.appendingPathComponent("Contents/XPCServices/DebugHelper.xpc/Contents/Info.plist")
+        )
+        try writePlist(
+            ["CFBundleIdentifier": "org.sparkle-project.Sparkle"],
+            to: appURL.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist")
+        )
+
+        let changes = try AppCloneRewriter(
+            appURL: appURL,
+            sourceMainBundleIdentifier: "com.tencent.xinWeChat",
+            cloneToken: "clone2"
+        ).rewrite()
+
+        XCTAssertEqual(changes.count, 5)
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/Info.plist")),
+            "com.tencent.xinWeChat.clone2"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/MacOS/WeChatAppEx.app/Contents/Info.plist")),
+            "com.tencent.flue.clone2.WeChatAppEx"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent(
+                "Contents/MacOS/WeChatAppEx.app/Contents/Frameworks/WeChatAppEx Framework.framework/Versions/C/Helpers/WeChatAppEx Helper.app/Contents/Info.plist"
+            )),
+            "com.tencent.flue.clone2.helper"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/PlugIns/WeChatMacShare.appex/Contents/Info.plist")),
+            "com.tencent.xinWeChat.clone2.WeChatMacShare"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/XPCServices/DebugHelper.xpc/Contents/Info.plist")),
+            "com.tencent.xWechat.clone2.DebugHelper"
+        )
+        XCTAssertEqual(
+            try readBundleIdentifier(at: appURL.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Info.plist")),
+            "org.sparkle-project.Sparkle"
+        )
+    }
+
+    private func writePlist(_ plist: [String: Any], to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
+        try data.write(to: url)
+    }
+
+    private func readBundleIdentifier(at url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        var format = PropertyListSerialization.PropertyListFormat.binary
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any]
+        )
+        return try XCTUnwrap(plist["CFBundleIdentifier"] as? String)
+    }
+}

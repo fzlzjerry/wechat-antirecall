@@ -10,6 +10,7 @@ private let fatMagic: UInt32 = 0xcafebabe
 private let fatMagic64: UInt32 = 0xcafebabf
 private let cpuTypeX8664: Int32 = 0x01000007
 private let cpuTypeARM64: Int32 = 0x0100000c
+private let codesignPreservedMetadata = "entitlements,requirements,flags,runtime"
 
 enum ToolError: LocalizedError {
     case usage(String)
@@ -480,6 +481,8 @@ struct CLI {
             try install(rest)
         case "restore":
             try restore(rest)
+        case "clone", "split":
+            try clone(rest)
         case "tip-phrase":
             try tipPhrase(rest)
         case "help", "--help", "-h":
@@ -727,6 +730,59 @@ struct CLI {
         }
     }
 
+    private func clone(_ arguments: [String]) throws {
+        let options = try CloneOptions(arguments)
+        let sourceAppInfo = try readAppInfo(appPath: options.appPath)
+        let outputURL = options.outputURL(for: sourceAppInfo.appURL).standardizedFileURL
+        let sourceURL = sourceAppInfo.appURL.standardizedFileURL
+
+        guard sourceURL != outputURL else {
+            throw ToolError.usage("clone 输出路径不能与源应用相同")
+        }
+        guard !FileManager.default.fileExists(atPath: outputURL.path) else {
+            throw ToolError.usage("clone 输出路径已存在：\(outputURL.path)")
+        }
+
+        print("Source: \(sourceAppInfo.appURL.path)")
+        print("Output: \(outputURL.path)")
+        print("Clone token: \(options.cloneToken)")
+        print("Checking whether source WeChat is running...")
+        try ensureAppNotRunning(appInfo: sourceAppInfo, dryRun: false)
+        print("Checking clone permissions...")
+        try validateClonePermissions(outputURL: outputURL)
+        print("Copying WeChat.app...")
+        do {
+            try FileManager.default.copyItem(at: sourceAppInfo.appURL, to: outputURL)
+        } catch {
+            throw ToolError.fileOperationFailed(
+                operation: "复制 WeChat.app",
+                path: outputURL.path,
+                underlying: error.localizedDescription
+            )
+        }
+
+        let changes = try AppCloneRewriter(
+            appURL: outputURL,
+            sourceMainBundleIdentifier: sourceAppInfo.bundleIdentifier,
+            cloneToken: options.cloneToken
+        ).rewrite()
+
+        print("Updated bundle identifiers:")
+        for change in changes {
+            print("  - \(change.relativePlistPath): \(change.oldIdentifier) -> \(change.newIdentifier)")
+        }
+
+        if options.skipResign {
+            print("Skipped code signing.")
+        } else {
+            print("Re-signing cloned app...")
+            try resign(appURL: outputURL, nestedBinaries: [])
+            print("Code signing complete.")
+        }
+
+        print("Clone created: \(outputURL.path)")
+    }
+
     private func printUsage() {
         print("""
         wechat-antirecall
@@ -735,6 +791,7 @@ struct CLI {
           wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json]
           wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--runtime-tip] [--runtime-dylib <path>] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
           wechat-antirecall restore  --backup <path> [--binary Contents/MacOS/WeChat] [--app /Applications/WeChat.app] [--skip-resign]
+          wechat-antirecall clone    [--app /Applications/WeChat.app] [--output /Applications/WeChat 2.app] [--index 2] [--skip-resign]
           wechat-antirecall tip-phrase get
           wechat-antirecall tip-phrase set <phrase>
           wechat-antirecall tip-phrase reset
@@ -872,6 +929,51 @@ private func displayName(forTargetIdentifier identifier: String) -> String {
         return "enable multi-instance (extra)"
     default:
         return identifier
+    }
+}
+
+struct CloneOptions {
+    var appPath = defaultAppPath
+    var outputPath: String?
+    var index = 2
+    var skipResign = false
+
+    var cloneToken: String {
+        "clone\(index)"
+    }
+
+    init(_ arguments: [String]) throws {
+        var parser = ArgumentCursor(arguments)
+        while let argument = parser.next() {
+            switch argument {
+            case "--app":
+                appPath = try parser.requiredValue(after: argument)
+            case "--output":
+                outputPath = try parser.requiredValue(after: argument)
+            case "--index":
+                let value = try parser.requiredValue(after: argument)
+                guard let parsed = Int(value), parsed >= 2 else {
+                    throw ToolError.usage("--index 需要一个大于等于 2 的整数")
+                }
+                index = parsed
+            case "--skip-resign":
+                skipResign = true
+            default:
+                throw ToolError.usage("未知参数：\(argument)")
+            }
+        }
+    }
+
+    func outputURL(for sourceAppURL: URL) -> URL {
+        if let outputPath {
+            let url = URL(fileURLWithPath: outputPath)
+            return url.pathExtension.lowercased() == "app" ? url : url.appendingPathExtension("app")
+        }
+
+        let sourceName = sourceAppURL.deletingPathExtension().lastPathComponent
+        return sourceAppURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(sourceName) \(index).app")
     }
 }
 
@@ -1447,7 +1549,7 @@ private func readAppInfo(appPath: String) throws -> AppInfo {
     guard let bundleIdentifier = plist["CFBundleIdentifier"] as? String else {
         throw ToolError.appInfoMissing("CFBundleIdentifier")
     }
-    guard bundleIdentifier == "com.tencent.xinWeChat" || bundleIdentifier == "com.tencent.xin" else {
+    guard isSupportedWechatBundleIdentifier(bundleIdentifier) else {
         throw ToolError.notAWechatApp(appPath)
     }
 
@@ -1458,6 +1560,128 @@ private func readAppInfo(appPath: String) throws -> AppInfo {
         buildVersion: buildVersion,
         bundleIdentifier: bundleIdentifier
     )
+}
+
+struct BundleIdentifierChange: Equatable {
+    let relativePlistPath: String
+    let oldIdentifier: String
+    let newIdentifier: String
+}
+
+struct AppCloneRewriter {
+    let appURL: URL
+    let sourceMainBundleIdentifier: String
+    let cloneToken: String
+
+    func rewrite() throws -> [BundleIdentifierChange] {
+        var changes: [BundleIdentifierChange] = []
+        for plistURL in try Self.bundleInfoPlistURLs(in: appURL) {
+            var (plist, format) = try readPropertyListDictionary(at: plistURL)
+            guard let currentIdentifier = plist["CFBundleIdentifier"] as? String,
+                  let clonedIdentifier = Self.clonedBundleIdentifier(
+                    from: currentIdentifier,
+                    sourceMainBundleIdentifier: sourceMainBundleIdentifier,
+                    cloneToken: cloneToken
+                  ),
+                  clonedIdentifier != currentIdentifier else {
+                continue
+            }
+
+            plist["CFBundleIdentifier"] = clonedIdentifier
+            try writePropertyListDictionary(plist, format: format, to: plistURL)
+            let relativePath = plistURL.path.replacingOccurrences(of: appURL.path + "/", with: "")
+            changes.append(BundleIdentifierChange(
+                relativePlistPath: relativePath,
+                oldIdentifier: currentIdentifier,
+                newIdentifier: clonedIdentifier
+            ))
+        }
+        return changes
+    }
+
+    static func bundleInfoPlistURLs(in appURL: URL) throws -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: appURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var urls: [URL] = []
+        for case let url as URL in enumerator {
+            guard url.lastPathComponent == "Info.plist", url.path.hasSuffix("/Contents/Info.plist") else {
+                continue
+            }
+            urls.append(url)
+        }
+        return urls.sorted { $0.path < $1.path }
+    }
+
+    static func clonedBundleIdentifier(
+        from original: String,
+        sourceMainBundleIdentifier: String,
+        cloneToken: String
+    ) -> String? {
+        var roots = [sourceMainBundleIdentifier, "com.tencent.xinWeChat", "com.tencent.xin", "com.tencent.flue", "com.tencent.xWechat"]
+        roots = roots.reduce(into: []) { result, root in
+            if !result.contains(root) {
+                result.append(root)
+            }
+        }
+
+        for root in roots {
+            if original == root {
+                return "\(root).\(cloneToken)"
+            }
+
+            let prefix = "\(root)."
+            if original.hasPrefix(prefix) {
+                return "\(root).\(cloneToken).\(original.dropFirst(prefix.count))"
+            }
+        }
+
+        return nil
+    }
+}
+
+private func isSupportedWechatBundleIdentifier(_ bundleIdentifier: String) -> Bool {
+    let supportedRoots = ["com.tencent.xinWeChat", "com.tencent.xin"]
+    return supportedRoots.contains(bundleIdentifier) || supportedRoots.contains { bundleIdentifier.hasPrefix("\($0).") }
+}
+
+private func validateClonePermissions(outputURL: URL) throws {
+    try requireDirectoryWritable(outputURL.deletingLastPathComponent(), operation: "创建 WeChat 分身")
+}
+
+private func readPropertyListDictionary(at url: URL) throws -> ([String: Any], PropertyListSerialization.PropertyListFormat) {
+    let data = try Data(contentsOf: url)
+    var format = PropertyListSerialization.PropertyListFormat.binary
+    guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: &format) as? [String: Any] else {
+        throw ToolError.fileOperationFailed(
+            operation: "读取 Info.plist",
+            path: url.path,
+            underlying: "顶层对象不是字典"
+        )
+    }
+    return (plist, format)
+}
+
+private func writePropertyListDictionary(
+    _ plist: [String: Any],
+    format: PropertyListSerialization.PropertyListFormat,
+    to url: URL
+) throws {
+    do {
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: format, options: 0)
+        try data.write(to: url, options: .atomic)
+    } catch {
+        throw ToolError.fileOperationFailed(
+            operation: "写入 Info.plist",
+            path: url.path,
+            underlying: error.localizedDescription
+        )
+    }
 }
 
 private func configForInstalledApp(_ appInfo: AppInfo, configs: [VersionConfig]) throws -> VersionConfig {
@@ -1602,15 +1826,17 @@ private func resign(appURL: URL, nestedBinaries: [URL]) throws {
         try signMachO(at: binaryURL)
     }
 
-    try runProcess("/usr/bin/codesign", ["--remove-sign", appURL.path])
-    try runProcess("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appURL.path])
+    _ = runProcessStatus("/usr/bin/codesign", ["--remove-sign", appURL.path])
+    try runCodesign(at: appURL.path, deep: true)
     try runProcess("/usr/bin/xattr", ["-cr", appURL.path])
 }
 
 private func signMachO(at url: URL) throws {
     _ = runProcessStatus("/usr/bin/codesign", ["--remove-sign", url.path])
-    if runProcessStatus("/usr/bin/codesign", ["--force", "--sign", "-", url.path]) == 0 {
+    do {
+        try runCodesign(at: url.path, deep: false)
         return
+    } catch {
     }
 
     try signMachOUsingTemporaryCopy(at: url)
@@ -1627,8 +1853,18 @@ private func signMachOUsingTemporaryCopy(at url: URL) throws {
     let temporaryURL = temporaryDirectory.appendingPathComponent(url.lastPathComponent)
     try FileManager.default.copyItem(at: url, to: temporaryURL)
     _ = runProcessStatus("/usr/bin/codesign", ["--remove-sign", temporaryURL.path])
-    try runProcess("/usr/bin/codesign", ["--force", "--sign", "-", temporaryURL.path])
+    try runCodesign(at: temporaryURL.path, deep: false)
     try runProcess("/bin/cp", ["-p", temporaryURL.path, url.path])
+}
+
+private func runCodesign(at path: String, deep: Bool) throws {
+    let baseArguments = ["--force"] + (deep ? ["--deep"] : [])
+    let preservedArguments = baseArguments + ["--preserve-metadata=\(codesignPreservedMetadata)", "--sign", "-", path]
+    if runProcessStatus("/usr/bin/codesign", preservedArguments) == 0 {
+        return
+    }
+
+    try runProcess("/usr/bin/codesign", baseArguments + ["--sign", "-", path])
 }
 
 private func uniqueURLs(_ urls: [URL]) -> [URL] {

@@ -3,7 +3,8 @@
 macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mach-O 地址补丁思路，默认只处理 `revoke` 目标，版本未知时拒绝写入。
 
 ## 更新
-- 2026.5.11 增加 268575（微信 4.1.9） 多开 
+- 2026.5.13 增加 `clone` / `split` 分身多开命令，推荐替代 `open -n` 方案
+- 2026.5.11 增加 268575（微信 4.1.9） 多开
 
 ## 支持的版本
 
@@ -28,10 +29,9 @@ macOS 微信 4 防撤回补丁工具。参考 WeChatTweak 的版本配置和 Mac
 
 **自定义撤回提示短语（`tip-phrase` + `--runtime-tip`）**：提供 X1a0He 风格的短语配置入口，支持 `{from}` 占位符和本地预览。`tip-phrase` 写入当前登录用户的 WeChat 容器偏好文件，请用普通用户执行，不要用 `sudo`。`--runtime-tip` 会把运行时 dylib 安装到 `Contents/Resources`，并给 `wechat.dylib` 注入 `LC_LOAD_DYLIB`，让撤回提示改用配置短语；目前支持构建号 `268597` / `268599`。
 
-**无限多开（`--multi-instance`）**：绕过微信 4.1.9 进程互斥检查，允许同时启动多个客户端实例（当前支持 `268575` / `268599`）。
+**分身多开（`clone` / `split`，推荐）**：复制现有 `WeChat.app`，重写主 app、`WeChatAppEx.app`、`appex`、`xpc` 等嵌套 bundle 的 `CFBundleIdentifier`，然后重签名，生成 `WeChat 2.app` / `WeChat 3.app` 这类独立分身。启动时直接打开分身 app，不再依赖 `open -n /Applications/WeChat.app`。
 
-<u>使用方法：选择带有多开参数的命令安装后，使用命令 `open -n /Applications/WeChat.app` 或者 使用多开启动器： [WeChatMulti](https://github.com/loohalh/WeChatMulti)</u>
-
+**无限多开（`--multi-instance`，旧方案）**：绕过微信 4.1.9 进程互斥检查，允许同时启动多个客户端实例（当前支持 `268575` / `268599`）。该方案在部分 4.1.9 构建上可能触发重复权限弹窗，当前更推荐使用 `clone` 分身方案。
 
 **屏蔽自动更新（`--block-update` / `--update-only`）**：针对微信 4.1.9 的 `XAppUpdateManager`，屏蔽 `startUpdater`、`startBackgroundUpdatesCheck:`、`checkForUpdates:`、`enableAutoUpdate:` 等入口，并让 `automaticallyDownloadsUpdates`、`canCheckForUpdate` 返回 `false`。
 
@@ -52,17 +52,11 @@ swift run wechat-antirecall install --dry-run --app /Applications/WeChat.app
 # 提示模式
 swift run wechat-antirecall install --with-tip --dry-run --app /Applications/WeChat.app
 
-# 提示模式 + 多开
-swift run wechat-antirecall install --with-tip --multi-instance --dry-run --app /Applications/WeChat.app
-
 # 只屏蔽自动更新
 swift run wechat-antirecall install --update-only --dry-run --app /Applications/WeChat.app
 
 # 防撤回并屏蔽自动更新
 swift run wechat-antirecall install --with-tip --block-update --dry-run --app /Applications/WeChat.app
-
-# 防撤回+屏蔽自动更新+多开
-swift run wechat-antirecall install --with-tip --block-update --multi-instance --dry-run --app /Applications/WeChat.app
 ```
 
 **可选步骤**：配置自定义撤回提示短语。
@@ -123,15 +117,34 @@ sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeC
 # 自定义撤回提示短语（仅 268597 / 268599）
 sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app
 
-# 提示模式 + 多开
-sudo .build/release/wechat-antirecall install --with-tip --multi-instance --app /Applications/WeChat.app
-
 # 只屏蔽自动更新
 sudo .build/release/wechat-antirecall install --update-only --app /Applications/WeChat.app
-
-# 提示模式防撤回 + 屏蔽自动更新 + 多开
-sudo .build/release/wechat-antirecall install --with-tip --block-update --multi-instance --app /Applications/WeChat.app
 ```
+
+### 分身多开（推荐）
+
+`clone` / `split` 不依赖 `patches.json` 的地址命中，也不需要对同一个 `WeChat.app` 做 `open -n`。它会复制源 app，重写分身里的 bundle 标识并重新签名，适合在已安装好防撤回的源微信上继续生成 `WeChat 2.app`。
+
+请先完全退出源微信，再执行：
+
+```bash
+# 生成 /Applications/WeChat 2.app
+sudo .build/release/wechat-antirecall clone --app /Applications/WeChat.app --index 2
+
+# 生成 /Applications/WeChat 3.app
+sudo .build/release/wechat-antirecall clone --app /Applications/WeChat.app --index 3
+
+# 自定义输出路径
+sudo .build/release/wechat-antirecall clone --app /Applications/WeChat.app --output "/Applications/WeChat Work.app" --index 2
+```
+
+生成后直接打开分身 app：
+
+```bash
+open "/Applications/WeChat 2.app"
+```
+
+如果源微信已经安装了防撤回或 `--runtime-tip`，分身会继承这些修改；如果你希望分身完全干净，请先恢复源微信再执行 `clone`。
 
 如果看到类似：
 
@@ -165,7 +178,6 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --with-tip --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app --no-backup
-sudo .build/release/wechat-antirecall install --with-tip --multi-instance --app /Applications/WeChat.app --no-backup
 sudo .build/release/wechat-antirecall install --update-only --app /Applications/WeChat.app --no-backup
 ```
 
@@ -214,7 +226,7 @@ sudo .build/release/wechat-antirecall restore \
 
 `expected` 支持单个十六进制字符串或字符串数组；提示模式会同时接受"原始字节"和"已装过静默补丁的字节"，支持直接在两种模式间切换而无需先恢复备份。
 
-`multiInstance` 目标目前覆盖 `268575` / `268599`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。
+`multiInstance` 目标目前覆盖 `268575` / `268599`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。`clone` / `split` 分身多开不依赖 `patches.json` 的地址配置，而是复制 app 并重写 bundle 标识。
 
 `update` 目标目前覆盖 `268575` / `268596` / `268597` / `268599`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
 
