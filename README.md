@@ -31,13 +31,12 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 
 | 构建号 | 架构 | 支持能力 | 补丁目标 |
 | --- | --- | --- | --- |
-| 31927, 31960, 32281, 32288, 34371 | arm64 | 静默防撤回 | `Contents/MacOS/WeChat` |
-| 34817 | x86_64 | 静默防撤回 | `Contents/MacOS/WeChat` |
-| 36559 | x86_64 | 静默防撤回 | `Contents/Frameworks/wechat.dylib` |
 | 268575 | arm64 | 静默防撤回、提示模式、多开、屏蔽更新 | `Contents/MacOS/WeChat`、`Contents/Resources/wechat.dylib` |
 | 268596 | arm64 | 静默防撤回、提示模式、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268597 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268599 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
+
+当前支持版本仅保留 `patches.json` 中每个 entry 都带有 `expected` 校验字节的配置。缺少 `expected` 的旧构建配置已移除，避免在无法确认原始字节时写入补丁。
 
 微信 4.1.9 的防撤回和屏蔽更新补丁目标在 `Contents/Resources/wechat.dylib`，不是主二进制。工具会先单独重签被 patch 的 dylib，再重签整个 app，避免运行到被修改代码页时触发 `Code Signature Invalid`。
 
@@ -307,17 +306,17 @@ sudo .build/release/wechat-antirecall install --runtime-dylib .build/release/lib
 
 ```json
 {
-  "version": "36559",
+  "version": "268597",
   "targets": [
     {
       "identifier": "revoke",
-      "binary": "Contents/Frameworks/wechat.dylib",
+      "binary": "Contents/Resources/wechat.dylib",
       "entries": [
         {
-          "arch": "x86_64",
-          "addr": "4B51260",
-          "expected": "B001000000C3",
-          "asm": "B801000000C3"
+          "arch": "arm64",
+          "addr": "45d05e4",
+          "expected": "E00F0034",
+          "asm": "7F000014"
         }
       ]
     }
@@ -329,6 +328,7 @@ sudo .build/release/wechat-antirecall install --runtime-dylib .build/release/lib
 
 - `binary` 省略时默认是 `Contents/MacOS/WeChat`。
 - `expected` 支持单个十六进制字符串或字符串数组。
+- 当前只保留每个 entry 都有 `expected` 校验的配置；新增或恢复构建号时必须先补齐原始字节校验。
 - 提示模式会同时接受原始字节和已安装静默补丁的字节，方便直接切换模式。
 - `multiInstance` 目标目前覆盖 `268575` / `268599`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。`clone` / `split` 分身多开不依赖 `patches.json` 的地址配置，而是复制 app 并重写 bundle 标识。
 - `update` 目标目前覆盖 `268575` / `268596` / `268597` / `268599`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。

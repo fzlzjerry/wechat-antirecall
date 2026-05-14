@@ -84,7 +84,7 @@ final class MachODylibInjectorTests: XCTestCase {
         try Data(contentsOf: try makeTemporaryMachO()).write(to: hostBinaryURL)
 
         let sourceDylibURL = directory.appendingPathComponent(RuntimeTipInstaller.dylibFileName)
-        try Data([0xca, 0xfe, 0xba, 0xbe]).write(to: sourceDylibURL)
+        try Data(contentsOf: try currentBuildRuntimeDylibURL()).write(to: sourceDylibURL)
 
         let appInfo = AppInfo(
             appURL: directory.appendingPathComponent("WeChat.app"),
@@ -121,7 +121,7 @@ final class MachODylibInjectorTests: XCTestCase {
         try Data(contentsOf: try makeTemporaryMachO()).write(to: hostBinaryURL)
 
         let sourceDylibURL = directory.appendingPathComponent(RuntimeTipInstaller.dylibFileName)
-        try Data([0xca, 0xfe, 0xba, 0xbe]).write(to: sourceDylibURL)
+        try Data(contentsOf: try currentBuildRuntimeDylibURL()).write(to: sourceDylibURL)
 
         let appInfo = AppInfo(
             appURL: directory.appendingPathComponent("WeChat.app"),
@@ -180,6 +180,17 @@ final class MachODylibInjectorTests: XCTestCase {
         let data = makeThinMachOData(contentOffset: contentOffset)
         try data.write(to: url)
         return url
+    }
+
+    private func currentBuildRuntimeDylibURL() throws -> URL {
+        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let candidates = [
+            cwd.appendingPathComponent(".build/debug/libWeChatAntiRecallRuntime.dylib"),
+            cwd.appendingPathComponent(".build/release/libWeChatAntiRecallRuntime.dylib"),
+            cwd.appendingPathComponent(".build/arm64-apple-macosx/debug/libWeChatAntiRecallRuntime.dylib"),
+            cwd.appendingPathComponent(".build/arm64-apple-macosx/release/libWeChatAntiRecallRuntime.dylib")
+        ]
+        return try XCTUnwrap(candidates.first(where: { FileManager.default.isReadableFile(atPath: $0.path) }))
     }
 
     private func makeTemporaryFatMachO(sliceOffset: Int, contentOffset: UInt32 = 320) throws -> URL {
