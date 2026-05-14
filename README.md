@@ -37,7 +37,7 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 | 268575 | arm64 | 静默防撤回、提示模式、多开、屏蔽更新 | `Contents/MacOS/WeChat`、`Contents/Resources/wechat.dylib` |
 | 268596 | arm64 | 静默防撤回、提示模式、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268597 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
-| 268599 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
+| 268589 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 
 微信 4.1.9 的防撤回和屏蔽更新补丁目标在 `Contents/Resources/wechat.dylib`，不是主二进制。工具会先单独重签被 patch 的 dylib，再重签整个 app，避免运行到被修改代码页时触发 `Code Signature Invalid`。
 
