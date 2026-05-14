@@ -39,6 +39,14 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeTipInstaller.validateRuntimeDylib(at: url))
     }
 
+    func testRuntimeDylibRejectsLegacyRuntimeWithoutRewriteMarker() throws {
+        let url = try makeLegacyRuntimeDylibWithOnlyLegacySymbols()
+
+        XCTAssertThrowsError(try RuntimeTipInstaller.validateRuntimeDylib(at: url)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("wechat_antirecall_rewrite_revoke_message_copy"))
+        }
+    }
+
     func testRuntimeDylibSymbolParserRequiresExactNames() {
         let symbols = RuntimeTipInstaller.exportedSymbolNames(
             fromNMOutput: """
@@ -143,6 +151,62 @@ final class SecurityHardeningTests: XCTestCase {
         let url = directory.appendingPathComponent(name)
         try data.write(to: url)
         return url
+    }
+
+    private func makeLegacyRuntimeDylibWithOnlyLegacySymbols() throws -> URL {
+        let directory = try temporaryDirectory()
+        let sourceURL = directory.appendingPathComponent("legacy-runtime.c")
+        let dylibURL = directory.appendingPathComponent("libWeChatAntiRecallRuntime.dylib")
+        let source = """
+        #include <stdint.h>
+
+        char *wechat_antirecall_render_revoke_tip_copy(const char *originalTip, const char *configuredPhrase) {
+            return 0;
+        }
+
+        char *wechat_antirecall_render_revoke_tip_for_event_copy(
+            const char *originalTip,
+            const char *configuredPhrase,
+            uint64_t newMsgId,
+            const char *xml,
+            const char *fallbackTime
+        ) {
+            return 0;
+        }
+
+        void wechat_antirecall_free(void *pointer) {
+        }
+        """
+        try source.write(to: sourceURL, atomically: true, encoding: .utf8)
+
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = [
+            "clang",
+            "-dynamiclib",
+            "-arch",
+            "arm64",
+            sourceURL.path,
+            "-o",
+            dylibURL.path
+        ]
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do {
+            try process.run()
+        } catch {
+            throw XCTSkip("xcrun clang is not available: \(error.localizedDescription)")
+        }
+
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let message = String(data: output, encoding: .utf8) ?? ""
+            throw XCTSkip("Could not build legacy runtime dylib fixture: \(message)")
+        }
+        return dylibURL
     }
 
     private func makeMinimalArm64DylibData() -> Data {

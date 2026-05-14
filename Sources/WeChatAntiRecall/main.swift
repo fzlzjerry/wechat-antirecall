@@ -1588,6 +1588,12 @@ struct RuntimeTipInstaller {
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
     static let supportedBuildVersions = ["268597", "268599"]
+    static let requiredRuntimeSymbols = [
+        "wechat_antirecall_render_revoke_tip_copy",
+        "wechat_antirecall_render_revoke_tip_for_event_copy",
+        "wechat_antirecall_rewrite_revoke_message_copy",
+        "wechat_antirecall_free"
+    ]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL
@@ -1676,12 +1682,7 @@ struct RuntimeTipInstaller {
         }
 
         let symbols = exportedSymbolNames(fromNMOutput: try runProcessOutput("/usr/bin/nm", ["-gU", url.path]))
-        let requiredSymbols = [
-            "wechat_antirecall_render_revoke_tip_copy",
-            "wechat_antirecall_render_revoke_tip_for_event_copy",
-            "wechat_antirecall_free"
-        ]
-        for symbol in requiredSymbols {
+        for symbol in requiredRuntimeSymbols {
             guard symbols.contains(symbol) else {
                 throw ToolError.invalidRuntimeDylib(path: url.path, reason: "缺少导出符号 \(symbol)")
             }
