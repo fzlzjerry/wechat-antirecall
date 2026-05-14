@@ -34,7 +34,7 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 | 268575 | arm64 | 静默防撤回、提示模式、多开、屏蔽更新 | `Contents/MacOS/WeChat`、`Contents/Resources/wechat.dylib` |
 | 268596 | arm64 | 静默防撤回、提示模式、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268597 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
-| 268589 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
+| 268599 | arm64 | 静默防撤回、提示模式、自定义提示、多开、屏蔽更新 | `Contents/MacOS/WeChat`、`Contents/Resources/wechat.dylib` |
 
 当前支持版本仅保留 `patches.json` 中每个 entry 都带有 `expected` 校验字节的配置。缺少 `expected` 的旧构建配置已移除，避免在无法确认原始字节时写入补丁。
 
@@ -332,6 +332,7 @@ sudo .build/release/wechat-antirecall install --runtime-dylib .build/release/lib
 - 提示模式会同时接受原始字节和已安装静默补丁的字节，方便直接切换模式。
 - `multiInstance` 目标目前覆盖 `268575` / `268599`（微信 4.1.9），当前提供 arm64 地址（主二进制 `Contents/MacOS/WeChat`）。`clone` / `split` 分身多开不依赖 `patches.json` 的地址配置，而是复制 app 并重写 bundle 标识。
 - `update` 目标目前覆盖 `268575` / `268596` / `268597` / `268599`（微信 4.1.9 arm64），核心是让更新入口提前返回，并把更新权限相关 getter 固定为 `false`。
+- `runtime-tip` 当前覆盖 `268597` / `268599`。运行时 hook 会先确认 XML 是撤回事件，再读取撤回消息字段，避免影响视频播放或外部浏览器打开链接等非撤回路径。
 - 显式请求 `--with-tip` 或 `--block-update` 时，当前构建号必须提供 `revoke-tip` 或 `update` 目标；工具不会静默降级。
 
 ## 参考

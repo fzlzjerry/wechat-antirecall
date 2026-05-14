@@ -254,6 +254,26 @@ final class RuntimeRewriteTests: XCTestCase {
         )
     }
 
+    func testRuntimeHookConfigMatchesSupportedBuilds() {
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268597"), 0x4764540)
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268599"), 0x47775cc)
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268596"), 0)
+    }
+
+    func testRuntimeOnlyInspectsMessageFieldsForRevokeXml() {
+        XCTAssertEqual(wechat_antirecall_should_inspect_revoke_message_fields(nil), 0)
+        XCTAssertEqual(
+            wechat_antirecall_should_inspect_revoke_message_fields("<sysmsg><notrevokemsg /></sysmsg>"),
+            0
+        )
+        XCTAssertEqual(
+            wechat_antirecall_should_inspect_revoke_message_fields(
+                "<sysmsg><revokemsg><newmsgid>51</newmsgid></revokemsg></sysmsg>"
+            ),
+            1
+        )
+    }
+
     func testHookSlotResolverRejectsOriginalBodyOutsideImageBounds() throws {
         let buffer = try makeExecutableStubBuffer()
         defer {

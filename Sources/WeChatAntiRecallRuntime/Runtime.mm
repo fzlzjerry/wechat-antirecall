@@ -46,12 +46,7 @@ NSString *mainBundleBuildVersion() {
     }
 }
 
-const RevokeHookConfig *revokeHookConfigForBuildVersion(NSString *buildVersion) {
-    if (buildVersion == nil) {
-        return nullptr;
-    }
-
-    const char *utf8 = [buildVersion UTF8String];
+const RevokeHookConfig *revokeHookConfigForBuildVersionCString(const char *utf8) {
     if (utf8 == nullptr) {
         return nullptr;
     }
@@ -63,6 +58,14 @@ const RevokeHookConfig *revokeHookConfigForBuildVersion(NSString *buildVersion) 
     }
 
     return nullptr;
+}
+
+const RevokeHookConfig *revokeHookConfigForBuildVersion(NSString *buildVersion) {
+    if (buildVersion == nil) {
+        return nullptr;
+    }
+
+    return revokeHookConfigForBuildVersionCString([buildVersion UTF8String]);
 }
 
 const RevokeHookConfig *currentRevokeHookConfig() {
@@ -874,6 +877,10 @@ bool looksLikeRevokeXML(const std::string *xml) {
         xml->find("</revokemsg>") != std::string::npos;
 }
 
+bool shouldInspectRevokeMessageFields(const std::string *xml) {
+    return looksLikeRevokeXML(xml);
+}
+
 bool looksLikeRevokeReplaceMsg(const std::string &replaceMsg) {
     if (replaceMsg.empty()) {
         return false;
@@ -936,9 +943,20 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
     if (!result || message == nullptr) {
         return result;
     }
+    // 268599 routes non-revoke XML through this parser; keep those paths away from the revoke message layout.
+    if (xml == nullptr ||
+        !isAddressRangeReadable(reinterpret_cast<uintptr_t>(xml), sizeof(std::string)) ||
+        !shouldInspectRevokeMessageFields(xml)) {
+        return result;
+    }
 
     auto *newMsgId = reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(message) + hookConfig->revokeNewMsgIdOffset);
     auto *replaceMsg = reinterpret_cast<std::string *>(reinterpret_cast<uint8_t *>(message) + hookConfig->revokeReplaceMsgOffset);
+    if (!isAddressRangeReadable(reinterpret_cast<uintptr_t>(newMsgId), sizeof(*newMsgId)) ||
+        !isAddressRangeReadable(reinterpret_cast<uintptr_t>(replaceMsg), sizeof(*replaceMsg))) {
+        return result;
+    }
+
     const uint64_t originalNewMsgId = *newMsgId;
     const std::string originalReplaceMsg = *replaceMsg;
 
@@ -1147,6 +1165,16 @@ void wechat_antirecall_free(void *pointer) {
 
 int wechat_antirecall_is_target_wechat_dylib_path(const char *imagePath) {
     return isTargetWeChatDylibPath(imagePath) ? 1 : 0;
+}
+
+uintptr_t wechat_antirecall_revoke_hook_original_body_for_build(const char *buildVersion) {
+    const auto *hookConfig = revokeHookConfigForBuildVersionCString(buildVersion);
+    return hookConfig == nullptr ? 0 : hookConfig->parseRevokeXMLOriginalBody;
+}
+
+int wechat_antirecall_should_inspect_revoke_message_fields(const char *xml) {
+    const std::string xmlString = xml == nullptr ? "" : xml;
+    return shouldInspectRevokeMessageFields(xml == nullptr ? nullptr : &xmlString) ? 1 : 0;
 }
 
 uintptr_t wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
