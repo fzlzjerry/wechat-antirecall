@@ -190,7 +190,10 @@ final class MachODylibInjectorTests: XCTestCase {
             cwd.appendingPathComponent(".build/arm64-apple-macosx/debug/libWeChatAntiRecallRuntime.dylib"),
             cwd.appendingPathComponent(".build/arm64-apple-macosx/release/libWeChatAntiRecallRuntime.dylib")
         ]
-        return try XCTUnwrap(candidates.first(where: { FileManager.default.isReadableFile(atPath: $0.path) }))
+        guard let url = candidates.first(where: { FileManager.default.isReadableFile(atPath: $0.path) }) else {
+            throw XCTSkip("Runtime dylib build artifact is not available")
+        }
+        return url
     }
 
     private func makeTemporaryFatMachO(sliceOffset: Int, contentOffset: UInt32 = 320) throws -> URL {

@@ -1395,6 +1395,9 @@ final class MachODylibInjector {
             }
 
             if cmd == lcLoadDylib {
+                guard cmdsize >= 24 else {
+                    throw ToolError.unsupportedMachO(fileURL.path)
+                }
                 let nameOffset = Int(data.leUInt32(at: commandOffset + 8))
                 guard nameOffset >= 24, nameOffset < cmdsize else {
                     throw ToolError.unsupportedMachO(fileURL.path)
@@ -1672,7 +1675,7 @@ struct RuntimeTipInstaller {
             throw ToolError.invalidRuntimeDylib(path: url.path, reason: "必须是包含 arm64 切片的 Mach-O dylib")
         }
 
-        let symbols = try runProcessOutput("/usr/bin/nm", ["-gU", url.path])
+        let symbols = exportedSymbolNames(fromNMOutput: try runProcessOutput("/usr/bin/nm", ["-gU", url.path]))
         let requiredSymbols = [
             "wechat_antirecall_render_revoke_tip_copy",
             "wechat_antirecall_render_revoke_tip_for_event_copy",
@@ -1683,6 +1686,22 @@ struct RuntimeTipInstaller {
                 throw ToolError.invalidRuntimeDylib(path: url.path, reason: "缺少导出符号 \(symbol)")
             }
         }
+    }
+
+    static func exportedSymbolNames(fromNMOutput output: String) -> Set<String> {
+        Set(
+            output.split(whereSeparator: \.isNewline).compactMap { line in
+                guard let rawName = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).last else {
+                    return nil
+                }
+
+                let name = String(rawName)
+                if name.hasPrefix("_") {
+                    return String(name.dropFirst())
+                }
+                return name
+            }
+        )
     }
 
     private func copyRuntimeDylib() throws {

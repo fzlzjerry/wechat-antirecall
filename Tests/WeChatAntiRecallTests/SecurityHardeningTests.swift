@@ -39,6 +39,19 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeTipInstaller.validateRuntimeDylib(at: url))
     }
 
+    func testRuntimeDylibSymbolParserRequiresExactNames() {
+        let symbols = RuntimeTipInstaller.exportedSymbolNames(
+            fromNMOutput: """
+            0000000000001110 T _fake_wechat_antirecall_free
+            0000000000001120 T _wechat_antirecall_render_revoke_tip_copy
+            0000000000001130 T _wechat_antirecall_render_revoke_tip_for_event_copy
+            """
+        )
+
+        XCTAssertTrue(symbols.contains("wechat_antirecall_render_revoke_tip_copy"))
+        XCTAssertFalse(symbols.contains("wechat_antirecall_free"))
+    }
+
     func testBuiltRuntimeDylibPassesValidation() throws {
         let runtimeURL = try currentBuildRuntimeDylibURL()
 
@@ -70,6 +83,17 @@ final class SecurityHardeningTests: XCTestCase {
         var command = Data()
         command.appendLE32(0x19)
         command.appendLE32(0)
+        let url = try temporaryFile(named: "wechat.dylib", data: makeThinMachOData(loadCommands: command))
+
+        XCTAssertThrowsError(
+            try MachODylibInjector(fileURL: url).inject(installName: installName, arch: .arm64, dryRun: true)
+        )
+    }
+
+    func testMachOInjectorRejectsShortLoadDylibCommandWithoutTrapping() throws {
+        var command = Data()
+        command.appendLE32(0xc)
+        command.appendLE32(8)
         let url = try temporaryFile(named: "wechat.dylib", data: makeThinMachOData(loadCommands: command))
 
         XCTAssertThrowsError(

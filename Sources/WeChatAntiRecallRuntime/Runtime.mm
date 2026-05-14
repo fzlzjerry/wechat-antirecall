@@ -449,6 +449,26 @@ bool matchesRenderedTemplate(const std::string &tip, const std::string &configur
     return true;
 }
 
+bool templateContainsOnlyPlaceholders(const std::string &configuredPhrase) {
+    const auto parts = literalPartsForTemplate(configuredPhrase);
+    if (parts.size() <= 1) {
+        return false;
+    }
+
+    for (const auto &part : parts) {
+        if (!part.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool looksLikeSourceRevokeTip(const std::string &tip) {
+    return tip.find("撤回") != std::string::npos
+        || tip.find(" recalled ") != std::string::npos
+        || tip.find("recalled a message") != std::string::npos;
+}
+
 std::string normalizeRenderedTip(const std::string &tip, const std::string &configuredPhrase) {
     auto normalized = tip;
     const auto parts = literalPartsForTemplate(configuredPhrase);
@@ -631,6 +651,9 @@ std::string renderRevokeTip(
         return normalizeRenderedTip(originalTip, configuredPhrase);
     }
     if (looksLikeKnownRenderedTip(originalTip)) {
+        return collapseDuplicateTimeMarkers(originalTip);
+    }
+    if (templateContainsOnlyPlaceholders(configuredPhrase) && !looksLikeSourceRevokeTip(originalTip)) {
         return collapseDuplicateTimeMarkers(originalTip);
     }
 

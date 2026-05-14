@@ -49,6 +49,45 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(rendered, "张三09:32")
     }
 
+    func testRenderingPureSenderPlaceholderIsIdempotent() throws {
+        let phrase = "{from}"
+        let rendered = try render(original: "张三撤回了一条消息", phrase: phrase)
+
+        XCTAssertEqual(try render(original: rendered, phrase: phrase), rendered)
+    }
+
+    func testRenderingPureTimePlaceholderIsIdempotent() throws {
+        let phrase = "{time}"
+        let rendered = try renderEvent(
+            original: "张三撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 46,
+            xml: nil,
+            fallbackTime: "09:32"
+        )
+
+        XCTAssertEqual(
+            try renderEvent(original: rendered, phrase: phrase, newMsgId: 47, xml: nil, fallbackTime: "09:33"),
+            rendered
+        )
+    }
+
+    func testRenderingAdjacentPurePlaceholdersTemplateIsIdempotent() throws {
+        let phrase = "{from}{time}"
+        let rendered = try renderEvent(
+            original: "张三撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 48,
+            xml: nil,
+            fallbackTime: "09:32"
+        )
+
+        XCTAssertEqual(
+            try renderEvent(original: rendered, phrase: phrase, newMsgId: 49, xml: nil, fallbackTime: "09:33"),
+            rendered
+        )
+    }
+
     func testReusesFirstFallbackTimeForSameRevokeEvent() throws {
         wechat_antirecall_clear_revoke_tip_time_cache()
         defer {
@@ -286,8 +325,8 @@ final class RuntimeRewriteTests: XCTestCase {
         let rendered = try rewriteMessage(
             original: "普通文本消息",
             phrase: "已拦截 {from} 撤回的一条消息",
-            newMsgId: 47,
-            xml: "<sysmsg><revokemsg><newmsgid>47</newmsgid></revokemsg></sysmsg>",
+            newMsgId: 50,
+            xml: "<sysmsg><revokemsg><newmsgid>50</newmsgid></revokemsg></sysmsg>",
             msgType: 10002,
             fallbackTime: "09:32"
         )
@@ -299,8 +338,8 @@ final class RuntimeRewriteTests: XCTestCase {
         let rendered = try rewriteMessage(
             original: "张三撤回了一条消息",
             phrase: "已拦截 {from} 撤回的一条消息",
-            newMsgId: 48,
-            xml: "<sysmsg><revokemsg><newmsgid>48</newmsgid></revokemsg></sysmsg>",
+            newMsgId: 51,
+            xml: "<sysmsg><revokemsg><newmsgid>51</newmsgid></revokemsg></sysmsg>",
             msgType: 10002,
             fallbackTime: "09:32"
         )
