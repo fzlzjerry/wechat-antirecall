@@ -1681,7 +1681,7 @@ struct RuntimeTipInstaller {
             throw ToolError.invalidRuntimeDylib(path: url.path, reason: "必须是包含 arm64 切片的 Mach-O dylib")
         }
 
-        let symbols = exportedSymbolNames(fromNMOutput: try runProcessOutput("/usr/bin/nm", ["-gU", url.path]))
+        let symbols = exportedSymbolNames(fromNMOutput: try runProcessOutput("/usr/bin/nm", ["-arch", "arm64", "-gU", url.path]))
         for symbol in requiredRuntimeSymbols {
             guard symbols.contains(symbol) else {
                 throw ToolError.invalidRuntimeDylib(path: url.path, reason: "缺少导出符号 \(symbol)")

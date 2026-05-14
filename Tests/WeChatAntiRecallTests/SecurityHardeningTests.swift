@@ -47,6 +47,14 @@ final class SecurityHardeningTests: XCTestCase {
         }
     }
 
+    func testRuntimeDylibValidatesRequiredSymbolsInArm64Slice() throws {
+        let url = try makeUniversalRuntimeDylibWithRewriteMarkerOnlyInX86Slice()
+
+        XCTAssertThrowsError(try RuntimeTipInstaller.validateRuntimeDylib(at: url)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("wechat_antirecall_rewrite_revoke_message_copy"))
+        }
+    }
+
     func testRuntimeDylibSymbolParserRequiresExactNames() {
         let symbols = RuntimeTipInstaller.exportedSymbolNames(
             fromNMOutput: """
@@ -155,9 +163,37 @@ final class SecurityHardeningTests: XCTestCase {
 
     private func makeLegacyRuntimeDylibWithOnlyLegacySymbols() throws -> URL {
         let directory = try temporaryDirectory()
-        let sourceURL = directory.appendingPathComponent("legacy-runtime.c")
         let dylibURL = directory.appendingPathComponent("libWeChatAntiRecallRuntime.dylib")
-        let source = """
+        try buildRuntimeDylib(at: dylibURL, arch: "arm64", includeRewriteMarker: false, directory: directory)
+        return dylibURL
+    }
+
+    private func makeUniversalRuntimeDylibWithRewriteMarkerOnlyInX86Slice() throws -> URL {
+        let directory = try temporaryDirectory()
+        let arm64URL = directory.appendingPathComponent("legacy-arm64.dylib")
+        let x86URL = directory.appendingPathComponent("current-x86_64.dylib")
+        let universalURL = directory.appendingPathComponent("libWeChatAntiRecallRuntime.dylib")
+
+        try buildRuntimeDylib(at: arm64URL, arch: "arm64", includeRewriteMarker: false, directory: directory)
+        try buildRuntimeDylib(at: x86URL, arch: "x86_64", includeRewriteMarker: true, directory: directory)
+        try runXcrun(
+            ["lipo", "-create", "-output", universalURL.path, arm64URL.path, x86URL.path],
+            skipContext: "Could not build universal runtime dylib fixture"
+        )
+        return universalURL
+    }
+
+    private func buildRuntimeDylib(at dylibURL: URL, arch: String, includeRewriteMarker: Bool, directory: URL) throws {
+        let sourceURL = directory.appendingPathComponent("\(arch)-runtime.c")
+        try runtimeSource(includeRewriteMarker: includeRewriteMarker).write(to: sourceURL, atomically: true, encoding: .utf8)
+        try runXcrun(
+            ["clang", "-dynamiclib", "-arch", arch, sourceURL.path, "-o", dylibURL.path],
+            skipContext: "Could not build \(arch) runtime dylib fixture"
+        )
+    }
+
+    private func runtimeSource(includeRewriteMarker: Bool) -> String {
+        """
         #include <stdint.h>
 
         char *wechat_antirecall_render_revoke_tip_copy(const char *originalTip, const char *configuredPhrase) {
@@ -176,37 +212,42 @@ final class SecurityHardeningTests: XCTestCase {
 
         void wechat_antirecall_free(void *pointer) {
         }
-        """
-        try source.write(to: sourceURL, atomically: true, encoding: .utf8)
 
+        \(includeRewriteMarker ? """
+        char *wechat_antirecall_rewrite_revoke_message_copy(
+            const char *originalTip,
+            const char *configuredPhrase,
+            uint64_t newMsgId,
+            const char *xml,
+            uint32_t msgType,
+            const char *fallbackTime
+        ) {
+            return 0;
+        }
+        """ : "")
+        """
+    }
+
+    private func runXcrun(_ arguments: [String], skipContext: String) throws {
         let process = Process()
         let pipe = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = [
-            "clang",
-            "-dynamiclib",
-            "-arch",
-            "arm64",
-            sourceURL.path,
-            "-o",
-            dylibURL.path
-        ]
+        process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = pipe
 
         do {
             try process.run()
         } catch {
-            throw XCTSkip("xcrun clang is not available: \(error.localizedDescription)")
+            throw XCTSkip("xcrun is not available: \(error.localizedDescription)")
         }
 
         let output = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             let message = String(data: output, encoding: .utf8) ?? ""
-            throw XCTSkip("Could not build legacy runtime dylib fixture: \(message)")
+            throw XCTSkip("\(skipContext): \(message)")
         }
-        return dylibURL
     }
 
     private func makeMinimalArm64DylibData() -> Data {
