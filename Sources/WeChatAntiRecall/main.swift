@@ -6,6 +6,7 @@ private let defaultBinaryPath = "Contents/MacOS/WeChat"
 private let lcSegment64: UInt32 = 0x19
 private let lcLoadDylib: UInt32 = 0xc
 private let mhMagic64: UInt32 = 0xfeedfacf
+private let mhDylib: UInt32 = 0x6
 private let fatMagic: UInt32 = 0xcafebabe
 private let fatMagic64: UInt32 = 0xcafebabf
 private let cpuTypeX8664: Int32 = 0x01000007
@@ -27,6 +28,8 @@ enum ToolError: LocalizedError {
     case permissionDenied(path: String, operation: String)
     case fileOperationFailed(operation: String, path: String, underlying: String)
     case appIsRunning(path: String, pids: [String])
+    case invalidBundleRelativePath(String)
+    case invalidRuntimeDylib(path: String, reason: String)
 
     var errorDescription: String? {
         switch self {
@@ -72,6 +75,10 @@ enum ToolError: LocalizedError {
             正在运行的进程 PID：\(pids.joined(separator: ", "))
             请先完全退出微信，再重新运行命令。运行中修改二进制可能触发 macOS Code Signature Invalid 崩溃。
             """
+        case .invalidBundleRelativePath(let path):
+            return "app bundle 内相对路径无效：\(path)"
+        case .invalidRuntimeDylib(let path, let reason):
+            return "runtime dylib 无效：\(path)。\(reason)"
         }
     }
 }
@@ -151,6 +158,33 @@ struct AppInfo {
     let shortVersion: String
     let buildVersion: String
     let bundleIdentifier: String
+}
+
+enum BundleRelativePath {
+    static func resolve(_ relativePath: String, in appURL: URL) throws -> URL {
+        guard !relativePath.isEmpty,
+              !relativePath.hasPrefix("/"),
+              relativePath != "." else {
+            throw ToolError.invalidBundleRelativePath(relativePath)
+        }
+
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !components.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else {
+            throw ToolError.invalidBundleRelativePath(relativePath)
+        }
+
+        let canonicalAppURL = appURL.standardizedFileURL
+        let canonicalAppPath = canonicalAppURL.path.hasSuffix("/")
+            ? canonicalAppURL.path
+            : "\(canonicalAppURL.path)/"
+        let resolvedURL = canonicalAppURL.appendingPathComponent(relativePath).standardizedFileURL
+
+        guard resolvedURL.path.hasPrefix(canonicalAppPath) else {
+            throw ToolError.invalidBundleRelativePath(relativePath)
+        }
+
+        return resolvedURL
+    }
 }
 
 enum PatchStatus {
@@ -549,11 +583,42 @@ struct CLI {
         try ensureAppNotRunning(appInfo: appInfo, dryRun: options.dryRun)
         print("Checking install permissions...")
         try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options, runtimeInstaller: runtimeInstaller)
+        if !options.dryRun {
+            print("Checking patch applicability...")
+            try preflightInstall(appInfo: appInfo, targets: targets, runtimeInstaller: runtimeInstaller)
+        }
 
+        var backupRecords: [BackupRecord] = []
+        do {
+            try performInstallWrites(
+                appInfo: appInfo,
+                options: options,
+                targets: targets,
+                runtimeInstaller: runtimeInstaller,
+                patchedBinaries: &patchedBinaries,
+                backedUpBinaryPaths: &backedUpBinaryPaths,
+                backupRecords: &backupRecords
+            )
+        } catch {
+            printInstallRecoveryHints(appInfo: appInfo, backupRecords: backupRecords)
+            throw error
+        }
+    }
+
+    private func performInstallWrites(
+        appInfo: AppInfo,
+        options: InstallOptions,
+        targets: [PatchTarget],
+        runtimeInstaller: RuntimeTipInstaller?,
+        patchedBinaries: inout [URL],
+        backedUpBinaryPaths: inout Set<String>,
+        backupRecords: inout [BackupRecord]
+    ) throws {
         if let runtimeInstaller {
             if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(runtimeInstaller.hostBinaryURL.standardizedFileURL.path).inserted {
                 print("Creating backup for \(RuntimeTipInstaller.hostBinaryPath)...")
                 let backupURL = try makeBackup(of: runtimeInstaller.hostBinaryURL)
+                backupRecords.append(BackupRecord(binaryPath: RuntimeTipInstaller.hostBinaryPath, backupURL: backupURL))
                 print("Backup: \(backupURL.path)")
             }
 
@@ -581,7 +646,7 @@ struct CLI {
         }
 
         for target in targets {
-            let binaryURL = appInfo.appURL.appendingPathComponent(target.binaryPath)
+            let binaryURL = try BundleRelativePath.resolve(target.binaryPath, in: appInfo.appURL)
             if !FileManager.default.fileExists(atPath: binaryURL.path) {
                 throw ToolError.invalidConfig("找不到目标二进制：\(target.binaryPath)")
             }
@@ -590,6 +655,7 @@ struct CLI {
             if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(binaryURL.standardizedFileURL.path).inserted {
                 print("Creating backup for \(target.binaryPath)...")
                 let backupURL = try makeBackup(of: binaryURL)
+                backupRecords.append(BackupRecord(binaryPath: target.binaryPath, backupURL: backupURL))
                 print("Backup: \(backupURL.path)")
             }
 
@@ -709,7 +775,7 @@ struct CLI {
     private func restore(_ arguments: [String]) throws {
         let options = try RestoreOptions(arguments)
         let appInfo = try readAppInfo(appPath: options.appPath)
-        let binaryURL = appInfo.appURL.appendingPathComponent(options.binaryPath)
+        let binaryURL = try BundleRelativePath.resolve(options.binaryPath, in: appInfo.appURL)
         let backupURL = URL(fileURLWithPath: options.backupPath)
 
         guard FileManager.default.fileExists(atPath: backupURL.path) else {
@@ -930,6 +996,11 @@ private func displayName(forTargetIdentifier identifier: String) -> String {
     default:
         return identifier
     }
+}
+
+struct BackupRecord {
+    let binaryPath: String
+    let backupURL: URL
 }
 
 struct CloneOptions {
@@ -1212,6 +1283,7 @@ final class MachODylibInjector {
                 installName: installName,
                 arch: arch,
                 machOffset: 0,
+                machEnd: data.count,
                 dryRun: dryRun,
                 data: &data
             ) else {
@@ -1230,24 +1302,40 @@ final class MachODylibInjector {
         dryRun: Bool,
         data: inout Data
     ) throws -> [DylibInjectionReport] {
+        guard data.hasRange(offset: 0, length: 8) else {
+            throw ToolError.unsupportedMachO(fileURL.path)
+        }
+
         let nfat = Int(data.beUInt32(at: 4))
         var offset = 8
         var reports: [DylibInjectionReport] = []
 
         for _ in 0..<nfat {
             let length = is64BitFat ? 32 : 20
+            guard data.hasRange(offset: offset, length: length) else {
+                throw ToolError.unsupportedMachO(fileURL.path)
+            }
             let cpuType = Int32(bitPattern: data.beUInt32(at: offset))
             let sliceOffset = is64BitFat ? data.beUInt64(at: offset + 8) : UInt64(data.beUInt32(at: offset + 8))
+            let sliceSize = is64BitFat ? data.beUInt64(at: offset + 16) : UInt64(data.beUInt32(at: offset + 12))
             offset += length
 
             guard cpuType == arch.cpuType else {
                 continue
             }
+            guard sliceOffset <= UInt64(Int.max),
+                  sliceSize <= UInt64(Int.max),
+                  sliceOffset <= UInt64(Int.max) - sliceSize,
+                  data.hasRange(offset: Int(sliceOffset), length: Int(sliceSize)) else {
+                throw ToolError.unsupportedMachO(fileURL.path)
+            }
+            let sliceEnd = Int(sliceOffset + sliceSize)
 
             if let report = try injectThin(
                 installName: installName,
                 arch: arch,
                 machOffset: Int(sliceOffset),
+                machEnd: sliceEnd,
                 dryRun: dryRun,
                 data: &data
             ) {
@@ -1266,9 +1354,13 @@ final class MachODylibInjector {
         installName: String,
         arch: CPUArch,
         machOffset: Int,
+        machEnd: Int,
         dryRun: Bool,
         data: inout Data
     ) throws -> DylibInjectionReport? {
+        guard data.hasRange(offset: machOffset, length: 32), machEnd <= data.count else {
+            throw ToolError.unsupportedMachO(fileURL.path)
+        }
         guard data.leUInt32(at: machOffset) == mhMagic64 else {
             throw ToolError.unsupportedMachO(fileURL.path)
         }
@@ -1282,18 +1374,34 @@ final class MachODylibInjector {
         let sizeofcmds = Int(data.leUInt32(at: machOffset + 20))
         let commandStart = machOffset + 32
         let insertionOffset = commandStart + sizeofcmds
+        guard commandStart <= insertionOffset,
+              insertionOffset <= machEnd,
+              data.hasRange(offset: commandStart, length: sizeofcmds) else {
+            throw ToolError.unsupportedMachO(fileURL.path)
+        }
 
         var commandOffset = commandStart
         var firstContentOffset = Int.max
         for _ in 0..<ncmds {
+            guard data.hasRange(offset: commandOffset, length: 8), commandOffset + 8 <= insertionOffset else {
+                throw ToolError.unsupportedMachO(fileURL.path)
+            }
             let cmd = data.leUInt32(at: commandOffset)
             let cmdsize = Int(data.leUInt32(at: commandOffset + 4))
-            guard cmdsize > 0 else {
+            guard cmdsize >= 8,
+                  commandOffset + cmdsize <= insertionOffset,
+                  data.hasRange(offset: commandOffset, length: cmdsize) else {
                 throw ToolError.unsupportedMachO(fileURL.path)
             }
 
             if cmd == lcLoadDylib {
+                guard cmdsize >= 24 else {
+                    throw ToolError.unsupportedMachO(fileURL.path)
+                }
                 let nameOffset = Int(data.leUInt32(at: commandOffset + 8))
+                guard nameOffset >= 24, nameOffset < cmdsize else {
+                    throw ToolError.unsupportedMachO(fileURL.path)
+                }
                 let start = commandOffset + nameOffset
                 let end = (start..<(commandOffset + cmdsize)).first { data[$0] == 0 } ?? commandOffset + cmdsize
                 let existingName = String(data: data[start..<end], encoding: .utf8)
@@ -1309,7 +1417,7 @@ final class MachODylibInjector {
             }
 
             if cmd == lcSegment64 {
-                let sliceRelativeContentOffset = firstSectionOffset(commandOffset: commandOffset, data: data)
+                let sliceRelativeContentOffset = try firstSectionOffset(commandOffset: commandOffset, commandEnd: commandOffset + cmdsize, data: data)
                 if sliceRelativeContentOffset != Int.max {
                     firstContentOffset = min(firstContentOffset, machOffset + sliceRelativeContentOffset)
                 }
@@ -1348,7 +1456,10 @@ final class MachODylibInjector {
         return report
     }
 
-    private func firstSectionOffset(commandOffset: Int, data: Data) -> Int {
+    private func firstSectionOffset(commandOffset: Int, commandEnd: Int, data: Data) throws -> Int {
+        guard data.hasRange(offset: commandOffset, length: 72), commandOffset + 72 <= commandEnd else {
+            throw ToolError.unsupportedMachO(fileURL.path)
+        }
         let nsects = Int(data.leUInt32(at: commandOffset + 64))
         guard nsects > 0 else {
             let fileoff = Int(data.leUInt64(at: commandOffset + 40))
@@ -1358,6 +1469,9 @@ final class MachODylibInjector {
         var result = Int.max
         var sectionOffset = commandOffset + 72
         for _ in 0..<nsects {
+            guard data.hasRange(offset: sectionOffset, length: 80), sectionOffset + 80 <= commandEnd else {
+                throw ToolError.unsupportedMachO(fileURL.path)
+            }
             let offset = Int(data.leUInt32(at: sectionOffset + 48))
             if offset > 0 {
                 result = min(result, offset)
@@ -1401,12 +1515,85 @@ final class MachODylibInjector {
     }
 }
 
+enum MachOInspector {
+    static func containsDylibSlice(data: Data, arch: CPUArch) -> Bool {
+        guard data.count >= 4 else {
+            return false
+        }
+
+        let nativeMagic = data.leUInt32(at: 0)
+        let bigEndianMagic = data.beUInt32(at: 0)
+        if bigEndianMagic == fatMagic || bigEndianMagic == fatMagic64 {
+            return containsFatDylibSlice(data: data, arch: arch, is64BitFat: bigEndianMagic == fatMagic64)
+        }
+
+        if nativeMagic == mhMagic64 {
+            return isDylibSlice(data: data, machOffset: 0, machEnd: data.count, arch: arch)
+        }
+
+        return false
+    }
+
+    private static func containsFatDylibSlice(data: Data, arch: CPUArch, is64BitFat: Bool) -> Bool {
+        guard data.count >= 8 else {
+            return false
+        }
+
+        let nfat = Int(data.beUInt32(at: 4))
+        var offset = 8
+        for _ in 0..<nfat {
+            let length = is64BitFat ? 32 : 20
+            guard data.hasRange(offset: offset, length: length) else {
+                return false
+            }
+
+            let cpuType = Int32(bitPattern: data.beUInt32(at: offset))
+            let sliceOffset64 = is64BitFat ? data.beUInt64(at: offset + 8) : UInt64(data.beUInt32(at: offset + 8))
+            let sliceSize64 = is64BitFat ? data.beUInt64(at: offset + 16) : UInt64(data.beUInt32(at: offset + 12))
+            offset += length
+
+            guard sliceOffset64 <= UInt64(Int.max),
+                  sliceSize64 <= UInt64(Int.max),
+                  sliceOffset64 <= UInt64(Int.max) - sliceSize64,
+                  data.hasRange(offset: Int(sliceOffset64), length: Int(sliceSize64)) else {
+                return false
+            }
+            let sliceOffset = Int(sliceOffset64)
+            let sliceSize = Int(sliceSize64)
+            if cpuType == arch.cpuType && isDylibSlice(data: data, machOffset: sliceOffset, machEnd: sliceOffset + sliceSize, arch: arch) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func isDylibSlice(data: Data, machOffset: Int, machEnd: Int, arch: CPUArch) -> Bool {
+        guard data.hasRange(offset: machOffset, length: 16), machEnd <= data.count else {
+            return false
+        }
+        guard data.leUInt32(at: machOffset) == mhMagic64 else {
+            return false
+        }
+
+        let cpuType = Int32(bitPattern: data.leUInt32(at: machOffset + 4))
+        let fileType = data.leUInt32(at: machOffset + 12)
+        return cpuType == arch.cpuType && fileType == mhDylib
+    }
+}
+
 struct RuntimeTipInstaller {
     static let dylibFileName = "libWeChatAntiRecallRuntime.dylib"
     static let installName = "@loader_path/\(dylibFileName)"
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
     static let supportedBuildVersions = ["268597", "268599"]
+    static let requiredRuntimeSymbols = [
+        "wechat_antirecall_render_revoke_tip_copy",
+        "wechat_antirecall_render_revoke_tip_for_event_copy",
+        "wechat_antirecall_rewrite_revoke_message_copy",
+        "wechat_antirecall_free"
+    ]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL
@@ -1457,6 +1644,7 @@ struct RuntimeTipInstaller {
             guard fileManager.isReadableFile(atPath: url.path) else {
                 throw ToolError.invalidConfig("找不到 runtime dylib：\(path)")
             }
+            try validateRuntimeDylib(at: url)
             return url
         }
 
@@ -1471,10 +1659,50 @@ struct RuntimeTipInstaller {
         ]
 
         if let url = candidates.first(where: { fileManager.isReadableFile(atPath: $0.path) }) {
+            try validateRuntimeDylib(at: url)
             return url
         }
 
         throw ToolError.usage("找不到 \(Self.dylibFileName)，请先运行 swift build -c release，或使用 --runtime-dylib <path>")
+    }
+
+    static func validateRuntimeDylib(at url: URL) throws {
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil {
+            throw ToolError.invalidRuntimeDylib(path: url.path, reason: "不允许使用符号链接")
+        }
+
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+        guard values.isRegularFile == true else {
+            throw ToolError.invalidRuntimeDylib(path: url.path, reason: "必须是普通文件")
+        }
+
+        let data = try Data(contentsOf: url)
+        guard MachOInspector.containsDylibSlice(data: data, arch: .arm64) else {
+            throw ToolError.invalidRuntimeDylib(path: url.path, reason: "必须是包含 arm64 切片的 Mach-O dylib")
+        }
+
+        let symbols = exportedSymbolNames(fromNMOutput: try runProcessOutput("/usr/bin/nm", ["-arch", "arm64", "-gU", url.path]))
+        for symbol in requiredRuntimeSymbols {
+            guard symbols.contains(symbol) else {
+                throw ToolError.invalidRuntimeDylib(path: url.path, reason: "缺少导出符号 \(symbol)")
+            }
+        }
+    }
+
+    static func exportedSymbolNames(fromNMOutput output: String) -> Set<String> {
+        Set(
+            output.split(whereSeparator: \.isNewline).compactMap { line in
+                guard let rawName = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).last else {
+                    return nil
+                }
+
+                let name = String(rawName)
+                if name.hasPrefix("_") {
+                    return String(name.dropFirst())
+                }
+                return name
+            }
+        )
     }
 
     private func copyRuntimeDylib() throws {
@@ -1702,7 +1930,7 @@ private func validateInstallPermissions(
     }
 
     for target in targets {
-        let binaryURL = appInfo.appURL.appendingPathComponent(target.binaryPath)
+        let binaryURL = try BundleRelativePath.resolve(target.binaryPath, in: appInfo.appURL)
         guard FileManager.default.fileExists(atPath: binaryURL.path) else {
             continue
         }
@@ -1724,6 +1952,34 @@ private func validateInstallPermissions(
 
     if !options.skipResign {
         try requireDirectoryWritable(appInfo.appURL, operation: "重签名 WeChat.app")
+    }
+}
+
+private func preflightInstall(appInfo: AppInfo, targets: [PatchTarget], runtimeInstaller: RuntimeTipInstaller?) throws {
+    if let runtimeInstaller {
+        _ = try runtimeInstaller.install(dryRun: true)
+    }
+
+    for target in targets {
+        let binaryURL = try BundleRelativePath.resolve(target.binaryPath, in: appInfo.appURL)
+        guard FileManager.default.fileExists(atPath: binaryURL.path) else {
+            throw ToolError.invalidConfig("找不到目标二进制：\(target.binaryPath)")
+        }
+        _ = try MachOPatcher(fileURL: binaryURL).patch(entries: target.entries, dryRun: true)
+    }
+}
+
+private func printInstallRecoveryHints(appInfo: AppInfo, backupRecords: [BackupRecord]) {
+    guard !backupRecords.isEmpty else {
+        return
+    }
+
+    fputs("Install failed after creating backups. Restore commands:\n", stderr)
+    for record in backupRecords {
+        fputs(
+            "  sudo .build/release/wechat-antirecall restore --app \(appInfo.appURL.path) --binary \(record.binaryPath) --backup \(record.backupURL.path)\n",
+            stderr
+        )
     }
 }
 
@@ -1908,6 +2164,22 @@ private func runProcessStatus(_ executable: String, _ arguments: [String]) -> In
     }
 }
 
+private func runProcessOutput(_ executable: String, _ arguments: [String]) throws -> String {
+    let process = Process()
+    let pipe = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = pipe
+    process.standardError = pipe
+    try process.run()
+    let output = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw ToolError.commandFailed(([executable] + arguments).joined(separator: " "), process.terminationStatus)
+    }
+    return String(data: output, encoding: .utf8) ?? ""
+}
+
 extension FileHandle {
     func readData(at offset: UInt64, length: Int) throws -> Data {
         try seek(toOffset: offset)
@@ -1920,6 +2192,10 @@ extension FileHandle {
 }
 
 extension Data {
+    func hasRange(offset: Int, length: Int) -> Bool {
+        offset >= 0 && length >= 0 && offset <= count && length <= count - offset
+    }
+
     init(hexString: String) throws {
         let cleaned = hexString.filter { !$0.isWhitespace }
         guard cleaned.count.isMultiple(of: 2) else {

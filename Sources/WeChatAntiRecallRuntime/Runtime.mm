@@ -1,11 +1,14 @@
 #import <Foundation/Foundation.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -110,12 +113,115 @@ bool isBranchRegister(uint32_t instruction, uint32_t targetRegister) {
     return instruction == (0xD61F0000 | (targetRegister << 5));
 }
 
-uintptr_t resolveParseRevokeXMLHookSlot(uintptr_t originalBodyAddress) {
-    if (originalBodyAddress < 16) {
+bool checkedRangeEnd(uintptr_t start, size_t length, uintptr_t &end) {
+    if (length == 0 || start > UINTPTR_MAX - length) {
+        return false;
+    }
+
+    end = start + length;
+    return true;
+}
+
+bool rangeContains(uintptr_t outerStart, size_t outerLength, uintptr_t innerStart, size_t innerLength) {
+    uintptr_t outerEnd = 0;
+    uintptr_t innerEnd = 0;
+    if (!checkedRangeEnd(outerStart, outerLength, outerEnd) ||
+        !checkedRangeEnd(innerStart, innerLength, innerEnd)) {
+        return false;
+    }
+
+    return innerStart >= outerStart && innerEnd <= outerEnd;
+}
+
+bool isAddressRangeReadable(uintptr_t address, size_t length) {
+    uintptr_t end = 0;
+    if (!checkedRangeEnd(address, length, end)) {
+        return false;
+    }
+
+    mach_vm_address_t cursor = static_cast<mach_vm_address_t>(address);
+    while (cursor < end) {
+        const uintptr_t requested = static_cast<uintptr_t>(cursor);
+        mach_vm_size_t regionSize = 0;
+        vm_region_basic_info_data_64_t info = {};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t objectName = MACH_PORT_NULL;
+        mach_vm_address_t regionAddress = cursor;
+        const kern_return_t result = mach_vm_region(
+            mach_task_self(),
+            &regionAddress,
+            &regionSize,
+            VM_REGION_BASIC_INFO_64,
+            reinterpret_cast<vm_region_info_t>(&info),
+            &count,
+            &objectName
+        );
+
+        if (objectName != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), objectName);
+        }
+        uintptr_t regionEnd = 0;
+        if (result != KERN_SUCCESS ||
+            !checkedRangeEnd(static_cast<uintptr_t>(regionAddress), static_cast<size_t>(regionSize), regionEnd) ||
+            static_cast<uintptr_t>(regionAddress) > requested ||
+            requested >= regionEnd ||
+            (info.protection & VM_PROT_READ) == 0) {
+            return false;
+        }
+
+        if (regionEnd >= end) {
+            return true;
+        }
+        cursor = static_cast<mach_vm_address_t>(regionEnd);
+    }
+
+    return true;
+}
+
+bool imageAddressRangeForHeader(const mach_header *header, intptr_t slide, uintptr_t &imageStart, size_t &imageSize) {
+    if (header == nullptr || header->magic != MH_MAGIC_64) {
+        return false;
+    }
+
+    const auto *header64 = reinterpret_cast<const mach_header_64 *>(header);
+    const uint8_t *cursor = reinterpret_cast<const uint8_t *>(header64) + sizeof(mach_header_64);
+    uintptr_t lowest = UINTPTR_MAX;
+    uintptr_t highest = 0;
+
+    for (uint32_t index = 0; index < header64->ncmds; index += 1) {
+        const auto *command = reinterpret_cast<const load_command *>(cursor);
+        if (command->cmd == LC_SEGMENT_64) {
+            const auto *segment = reinterpret_cast<const segment_command_64 *>(cursor);
+            if (segment->vmsize != 0) {
+                const uintptr_t start = static_cast<uintptr_t>(slide + segment->vmaddr);
+                const uintptr_t end = start + static_cast<uintptr_t>(segment->vmsize);
+                lowest = std::min(lowest, start);
+                highest = std::max(highest, end);
+            }
+        }
+        cursor += command->cmdsize;
+    }
+
+    if (lowest == UINTPTR_MAX || highest <= lowest) {
+        return false;
+    }
+
+    imageStart = lowest;
+    imageSize = highest - lowest;
+    return true;
+}
+
+uintptr_t resolveParseRevokeXMLHookSlotInImage(uintptr_t originalBodyAddress, uintptr_t imageStart, size_t imageSize) {
+    if (originalBodyAddress < 16 || imageSize == 0) {
         return 0;
     }
 
     const uintptr_t stubAddress = originalBodyAddress - 16;
+    if (!rangeContains(imageStart, imageSize, stubAddress, sizeof(uint32_t) * 4) ||
+        !isAddressRangeReadable(stubAddress, sizeof(uint32_t) * 4)) {
+        return 0;
+    }
+
     const auto *instructions = reinterpret_cast<const uint32_t *>(stubAddress);
 
     uintptr_t pageAddress = 0;
@@ -144,7 +250,13 @@ uintptr_t resolveParseRevokeXMLHookSlot(uintptr_t originalBodyAddress) {
         return 0;
     }
 
-    return pageAddress + ldrOffset;
+    const uintptr_t hookSlot = pageAddress + ldrOffset;
+    if (!rangeContains(imageStart, imageSize, hookSlot, sizeof(void *)) ||
+        !isAddressRangeReadable(hookSlot, sizeof(void *))) {
+        return 0;
+    }
+
+    return hookSlot;
 }
 
 std::string trimCopy(const std::string &value) {
@@ -263,6 +375,12 @@ bool looksLikeKnownRenderedTip(const std::string &tip) {
     return hasPrefix(tip, "已拦截") && tip.find("撤回") != std::string::npos;
 }
 
+bool looksLikeSourceRevokeTip(const std::string &tip) {
+    return tip.find("撤回") != std::string::npos
+        || tip.find(" recalled ") != std::string::npos
+        || tip.find("recalled a message") != std::string::npos;
+}
+
 const std::vector<std::string> &revokeTipPlaceholders() {
     static const std::vector<std::string> placeholders = {
         "{from}",
@@ -300,6 +418,17 @@ bool matchesRenderedTemplate(const std::string &tip, const std::string &configur
     const auto parts = literalPartsForTemplate(configuredPhrase);
     if (parts.size() <= 1) {
         return tip == configuredPhrase;
+    }
+
+    bool hasLiteralPart = false;
+    for (const auto &part : parts) {
+        if (!part.empty()) {
+            hasLiteralPart = true;
+            break;
+        }
+    }
+    if (!hasLiteralPart) {
+        return !looksLikeSourceRevokeTip(tip);
     }
 
     if (!parts.front().empty() && !hasPrefix(tip, parts.front())) {
@@ -612,9 +741,16 @@ NSArray<NSString *> *preferencePlistPaths(NSString *homeDirectory) {
         return @[];
     }
 
+    NSString *sandboxDataSuffix = @"Library/Containers/com.tencent.xinWeChat/Data";
+    if ([homeDirectory hasSuffix:sandboxDataSuffix]) {
+        return @[
+            [homeDirectory stringByAppendingPathComponent:@"Library/Preferences/com.tencent.xinWeChat.plist"],
+        ];
+    }
+
     return @[
-        [homeDirectory stringByAppendingPathComponent:@"Library/Preferences/com.tencent.xinWeChat.plist"],
         [homeDirectory stringByAppendingPathComponent:@"Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences/com.tencent.xinWeChat.plist"],
+        [homeDirectory stringByAppendingPathComponent:@"Library/Preferences/com.tencent.xinWeChat.plist"],
     ];
 }
 
@@ -639,7 +775,8 @@ NSNumber *probeFlagFromPreferencePlists(NSString *homeDirectory) {
 }
 
 NSString *configuredPhraseForHomeDirectory(NSString *homeDirectory) {
-    NSString *phrase = phraseFromDefaults([NSUserDefaults standardUserDefaults]);
+    NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
+    NSString *phrase = phraseFromPreferencePlists(home);
     if (phrase != nil) {
         return phrase;
     }
@@ -650,8 +787,7 @@ NSString *configuredPhraseForHomeDirectory(NSString *homeDirectory) {
         return phrase;
     }
 
-    NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
-    phrase = phraseFromPreferencePlists(home);
+    phrase = phraseFromDefaults([NSUserDefaults standardUserDefaults]);
     if (phrase != nil) {
         return phrase;
     }
@@ -660,7 +796,8 @@ NSString *configuredPhraseForHomeDirectory(NSString *homeDirectory) {
 }
 
 bool debugProbeEnabledForHomeDirectory(NSString *homeDirectory) {
-    NSNumber *probeEnabled = probeFlagFromDefaults([NSUserDefaults standardUserDefaults]);
+    NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
+    NSNumber *probeEnabled = probeFlagFromPreferencePlists(home);
     if (probeEnabled != nil) {
         return [probeEnabled boolValue];
     }
@@ -671,8 +808,7 @@ bool debugProbeEnabledForHomeDirectory(NSString *homeDirectory) {
         return [probeEnabled boolValue];
     }
 
-    NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
-    probeEnabled = probeFlagFromPreferencePlists(home);
+    probeEnabled = probeFlagFromDefaults([NSUserDefaults standardUserDefaults]);
     if (probeEnabled != nil) {
         return [probeEnabled boolValue];
     }
@@ -729,6 +865,45 @@ void logRevokeProbe(uint32_t msgType, uint64_t newMsgId, const std::string &repl
     }
 }
 
+bool looksLikeRevokeXML(const std::string *xml) {
+    if (xml == nullptr || xml->empty()) {
+        return false;
+    }
+
+    return xml->find("<revokemsg") != std::string::npos &&
+        xml->find("</revokemsg>") != std::string::npos;
+}
+
+bool looksLikeRevokeReplaceMsg(const std::string &replaceMsg) {
+    if (replaceMsg.empty()) {
+        return false;
+    }
+
+    return replaceMsg.find("撤回") != std::string::npos ||
+        replaceMsg.find(" recalled ") != std::string::npos ||
+        replaceMsg.find(" recalled a message") != std::string::npos;
+}
+
+bool shouldRewriteRevokeMessage(uint32_t, uint64_t, const std::string &replaceMsg, const std::string *xml) {
+    return looksLikeRevokeXML(xml) && looksLikeRevokeReplaceMsg(replaceMsg);
+}
+
+std::string rewriteRevokeMessage(
+    const std::string &originalTip,
+    const std::string &configuredPhrase,
+    uint64_t newMsgId,
+    const std::string *xml,
+    uint32_t msgType,
+    const std::string &fallbackTime
+) {
+    if (!shouldRewriteRevokeMessage(msgType, newMsgId, originalTip, xml)) {
+        return originalTip;
+    }
+
+    const auto timeText = stableRevokeTimeText(newMsgId, xml, originalTip, fallbackTime);
+    return renderRevokeTip(originalTip, configuredPhrase, timeText);
+}
+
 char *copyCString(const char *value) {
     if (value == nullptr) {
         return nullptr;
@@ -773,17 +948,22 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
         }
 
         const char *phrase = [configuredPhrase() UTF8String];
-        if (phrase != nullptr) {
+        if (phrase != nullptr && shouldRewriteRevokeMessage(msgType, originalNewMsgId, originalReplaceMsg, xml)) {
             *newMsgId = 0;
-            const auto timeText = stableRevokeTimeText(originalNewMsgId, xml, originalReplaceMsg, currentTimeText());
-            replaceMsg->assign(renderRevokeTip(originalReplaceMsg, phrase, timeText));
+            replaceMsg->assign(rewriteRevokeMessage(originalReplaceMsg, phrase, originalNewMsgId, xml, msgType, currentTimeText()));
         }
     }
 
     return result;
 }
 
-uintptr_t findWeChatDylibSlide() {
+struct WeChatDylibImage {
+    uintptr_t slide;
+    uintptr_t start;
+    size_t size;
+};
+
+bool findWeChatDylibImage(WeChatDylibImage &image) {
     const uint32_t imageCount = _dyld_image_count();
     for (uint32_t index = 0; index < imageCount; index += 1) {
         const char *imageName = _dyld_get_image_name(index);
@@ -792,17 +972,55 @@ uintptr_t findWeChatDylibSlide() {
         }
 
         if (isTargetWeChatDylibPath(imageName)) {
-            return static_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(index));
+            const auto slide = _dyld_get_image_vmaddr_slide(index);
+            uintptr_t start = 0;
+            size_t size = 0;
+            if (!imageAddressRangeForHeader(_dyld_get_image_header(index), slide, start, size)) {
+                return false;
+            }
+
+            image = {
+                static_cast<uintptr_t>(slide),
+                start,
+                size,
+            };
+            return true;
         }
     }
 
-    return 0;
+    return false;
 }
 
 bool writeHookSlot(void **slot, void *replacement) {
+    if (slot == nullptr || replacement == nullptr || !isAddressRangeReadable(reinterpret_cast<uintptr_t>(slot), sizeof(void *))) {
+        return false;
+    }
+
+    mach_vm_address_t regionAddress = reinterpret_cast<mach_vm_address_t>(slot);
+    mach_vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t info = {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    const kern_return_t regionResult = mach_vm_region(
+        mach_task_self(),
+        &regionAddress,
+        &regionSize,
+        VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&info),
+        &count,
+        &objectName
+    );
+    if (objectName != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), objectName);
+    }
+    if (regionResult != KERN_SUCCESS) {
+        return false;
+    }
+
     const auto pageSize = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
     const auto slotAddress = reinterpret_cast<uintptr_t>(slot);
     const auto pageStart = slotAddress & ~(pageSize - 1);
+    void *originalValue = *slot;
 
     const kern_return_t result = vm_protect(
         mach_task_self(),
@@ -816,7 +1034,20 @@ bool writeHookSlot(void **slot, void *replacement) {
     }
 
     *slot = replacement;
-    return true;
+    const bool wroteReplacement = *slot == replacement;
+    if (!wroteReplacement) {
+        *slot = originalValue;
+    }
+
+    vm_protect(
+        mach_task_self(),
+        static_cast<vm_address_t>(pageStart),
+        static_cast<vm_size_t>(pageSize),
+        false,
+        info.protection
+    );
+
+    return wroteReplacement;
 }
 
 void installRevokeTipHook() {
@@ -825,13 +1056,13 @@ void installRevokeTipHook() {
         return;
     }
 
-    const uintptr_t slide = findWeChatDylibSlide();
-    if (slide == 0) {
+    WeChatDylibImage image = {};
+    if (!findWeChatDylibImage(image)) {
         return;
     }
 
-    const uintptr_t originalBodyAddress = slide + hookConfig->parseRevokeXMLOriginalBody;
-    const uintptr_t hookSlotAddress = resolveParseRevokeXMLHookSlot(originalBodyAddress);
+    const uintptr_t originalBodyAddress = image.slide + hookConfig->parseRevokeXMLOriginalBody;
+    const uintptr_t hookSlotAddress = resolveParseRevokeXMLHookSlotInImage(originalBodyAddress, image.start, image.size);
     if (hookSlotAddress == 0) {
         return;
     }
@@ -842,7 +1073,9 @@ void installRevokeTipHook() {
     }
 
     originalParseRevokeXML = reinterpret_cast<ParseRevokeXML>(originalBodyAddress);
-    writeHookSlot(hookSlot, reinterpret_cast<void *>(&hookedParseRevokeXML));
+    if (!writeHookSlot(hookSlot, reinterpret_cast<void *>(&hookedParseRevokeXML))) {
+        originalParseRevokeXML = nullptr;
+    }
 }
 
 } // namespace
@@ -872,6 +1105,30 @@ char *wechat_antirecall_render_revoke_tip_for_event_copy(
     return copyCString(rendered.c_str());
 }
 
+char *wechat_antirecall_rewrite_revoke_message_copy(
+    const char *originalTip,
+    const char *configuredPhrase,
+    uint64_t newMsgId,
+    const char *xml,
+    uint32_t msgType,
+    const char *fallbackTime
+) {
+    const std::string original = originalTip == nullptr ? "" : originalTip;
+    const std::string phrase = configuredPhrase == nullptr ? "" : configuredPhrase;
+    const std::string xmlString = xml == nullptr ? "" : xml;
+    const std::string fallback = fallbackTime == nullptr ? currentTimeText() : fallbackTime;
+    const auto rendered = rewriteRevokeMessage(
+        original,
+        phrase,
+        newMsgId,
+        xml == nullptr ? nullptr : &xmlString,
+        msgType,
+        fallback
+    );
+
+    return copyCString(rendered.c_str());
+}
+
 char *wechat_antirecall_load_revoke_tip_phrase_for_home_copy(const char *homeDirectory) {
     @autoreleasepool {
         NSString *home = homeDirectory == nullptr ? nil : [NSString stringWithUTF8String:homeDirectory];
@@ -890,6 +1147,22 @@ void wechat_antirecall_free(void *pointer) {
 
 int wechat_antirecall_is_target_wechat_dylib_path(const char *imagePath) {
     return isTargetWeChatDylibPath(imagePath) ? 1 : 0;
+}
+
+uintptr_t wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
+    uintptr_t originalBodyAddress,
+    uintptr_t imageStart,
+    uintptr_t imageSize
+) {
+    return resolveParseRevokeXMLHookSlotInImage(originalBodyAddress, imageStart, static_cast<size_t>(imageSize));
+}
+
+int wechat_antirecall_try_write_hook_slot(void **slot, void *replacement) {
+    return writeHookSlot(slot, replacement) ? 1 : 0;
+}
+
+int wechat_antirecall_is_address_range_readable(uintptr_t address, uintptr_t length) {
+    return isAddressRangeReadable(address, static_cast<size_t>(length)) ? 1 : 0;
 }
 
 __attribute__((constructor))
