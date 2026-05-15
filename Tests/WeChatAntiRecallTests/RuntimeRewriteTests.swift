@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 import WeChatAntiRecallRuntime
 
@@ -164,6 +165,82 @@ final class RuntimeRewriteTests: XCTestCase {
         )
     }
 
+    func testBuildSpecificRevokeHookOriginalBodyLookup() {
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268597"), 0x4764540)
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268599"), 0x47775cc)
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268596"), 0)
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build(nil), 0)
+    }
+
+    func testOnlyRevokeXMLAllowsInspectingMessageFields() {
+        XCTAssertEqual(wechat_antirecall_should_inspect_revoke_message_fields(nil), 0)
+        XCTAssertEqual(wechat_antirecall_should_inspect_revoke_message_fields("<sysmsg><foo /></sysmsg>"), 0)
+        XCTAssertEqual(wechat_antirecall_should_inspect_revoke_message_fields("<msg><videomsg /></msg>"), 0)
+        XCTAssertEqual(wechat_antirecall_should_inspect_revoke_message_fields("<msg><appmsg><type>5</type></appmsg></msg>"), 0)
+        XCTAssertEqual(
+            wechat_antirecall_should_inspect_revoke_message_fields(
+                "<sysmsg><revokemsg><newmsgid>42</newmsgid></revokemsg></sysmsg>"
+            ),
+            1
+        )
+    }
+
+    func testHookSlotResolverRejectsOriginalBodyOutsideImageBounds() throws {
+        let mapping = try makeMappedPage()
+        defer {
+            munmap(mapping.baseAddress, mapping.length)
+        }
+
+        let originalBody = UInt(bitPattern: mapping.baseAddress.advanced(by: 16))
+
+        XCTAssertEqual(
+            wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
+                originalBody,
+                originalBody,
+                UInt(mapping.length - 16)
+            ),
+            0
+        )
+    }
+
+    func testHookSlotResolverParsesArm64StubBeforeOriginalBody() throws {
+        let mapping = try makeMappedPage()
+        defer {
+            munmap(mapping.baseAddress, mapping.length)
+        }
+
+        let stub: [UInt32] = [
+            0x90000009, // adrp x9, current page
+            0xf9404129, // ldr x9, [x9, #0x80]
+            0xb4000049, // cbz x9, original body
+            0xd61f0120, // br x9
+        ]
+        try stub.withUnsafeBytes { bytes in
+            guard let source = bytes.baseAddress else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EINVAL))
+            }
+            memcpy(mapping.baseAddress, source, bytes.count)
+        }
+
+        let imageStart = UInt(bitPattern: mapping.baseAddress)
+        let originalBody = UInt(bitPattern: mapping.baseAddress.advanced(by: 16))
+        let expectedSlot = UInt(bitPattern: mapping.baseAddress.advanced(by: 0x80))
+
+        XCTAssertEqual(
+            wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
+                originalBody,
+                imageStart,
+                UInt(mapping.length)
+            ),
+            expectedSlot
+        )
+    }
+
+    func testAddressRangeReadableRejectsUnmappedGap() {
+        XCTAssertEqual(wechat_antirecall_is_address_range_readable(0, 1), 0)
+        XCTAssertEqual(wechat_antirecall_is_address_range_readable(0x1, 16), 0)
+    }
+
     private func render(original: String, phrase: String) throws -> String {
         let pointer = wechat_antirecall_render_revoke_tip_copy(original, phrase)
         let unwrapped = try XCTUnwrap(pointer)
@@ -210,6 +287,16 @@ final class RuntimeRewriteTests: XCTestCase {
             .appendingPathComponent("wechat-antirecall-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    private func makeMappedPage() throws -> (baseAddress: UnsafeMutableRawPointer, length: Int) {
+        let pageSize = Int(getpagesize())
+        guard let mapping = mmap(nil, pageSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0),
+              mapping != MAP_FAILED
+        else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        return (mapping, pageSize)
     }
 
     private func writePhrase(_ phrase: String, to url: URL) throws {

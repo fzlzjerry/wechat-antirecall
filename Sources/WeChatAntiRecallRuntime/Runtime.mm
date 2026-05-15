@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -15,16 +17,26 @@
 
 namespace {
 
-constexpr uintptr_t parseRevokeXMLHookSlot = 0x92da2c0;
-constexpr uintptr_t parseRevokeXMLOriginalBody = 0x4764540;
-constexpr ptrdiff_t revokeNewMsgIdOffset = 0x168;
-constexpr ptrdiff_t revokeReplaceMsgOffset = 0x170;
 constexpr NSUInteger revokeTipMaximumLength = 120;
 constexpr size_t revokeTimeCacheMaximumCount = 512;
+constexpr size_t arm64StubLength = 16;
 
 using ParseRevokeXML = bool (*)(void *, std::string *, void *, uint32_t);
 
+struct RevokeHookConfig {
+    const char *buildVersion;
+    uintptr_t originalBody;
+    ptrdiff_t newMsgIdOffset;
+    ptrdiff_t replaceMsgOffset;
+};
+
+constexpr RevokeHookConfig revokeHookConfigs[] = {
+    {"268597", 0x4764540, 0x168, 0x170},
+    {"268599", 0x47775cc, 0x168, 0x170},
+};
+
 ParseRevokeXML originalParseRevokeXML = nullptr;
+const RevokeHookConfig *activeRevokeHookConfig = nullptr;
 std::mutex revokeTimeCacheMutex;
 std::unordered_map<std::string, std::string> revokeTimeCache;
 
@@ -59,6 +71,245 @@ bool hasSuffix(const std::string &value, const std::string &suffix) {
 bool hasPrefix(const std::string &value, const std::string &prefix) {
     return value.size() >= prefix.size() &&
         value.compare(0, prefix.size(), prefix) == 0;
+}
+
+const RevokeHookConfig *revokeHookConfigForBuild(const char *buildVersion) {
+    if (buildVersion == nullptr) {
+        return nullptr;
+    }
+
+    for (const auto &config : revokeHookConfigs) {
+        if (std::strcmp(config.buildVersion, buildVersion) == 0) {
+            return &config;
+        }
+    }
+    return nullptr;
+}
+
+uintptr_t revokeHookOriginalBodyForBuild(const char *buildVersion) {
+    const auto *config = revokeHookConfigForBuild(buildVersion);
+    return config == nullptr ? 0 : config->originalBody;
+}
+
+std::string currentBundleBuildVersion() {
+    @autoreleasepool {
+        id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
+        if (![value isKindOfClass:[NSString class]]) {
+            return "";
+        }
+
+        const char *utf8 = [(NSString *)value UTF8String];
+        return utf8 == nullptr ? "" : std::string(utf8);
+    }
+}
+
+bool shouldInspectRevokeMessageFields(const std::string *xml) {
+    if (xml == nullptr) {
+        return false;
+    }
+
+    return xml->find("<revokemsg>") != std::string::npos ||
+        xml->find("<revokemsg ") != std::string::npos;
+}
+
+bool isAddressRangeReadable(const void *address, size_t length) {
+    if (address == nullptr || length == 0) {
+        return false;
+    }
+
+    mach_vm_address_t current = reinterpret_cast<mach_vm_address_t>(address);
+    const mach_vm_address_t end = current + length;
+    if (end < current) {
+        return false;
+    }
+
+    while (current < end) {
+        mach_vm_address_t regionAddress = current;
+        mach_vm_size_t regionSize = 0;
+        vm_region_basic_info_data_64_t info = {};
+        mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t objectName = MACH_PORT_NULL;
+        const kern_return_t result = mach_vm_region(
+            mach_task_self(),
+            &regionAddress,
+            &regionSize,
+            VM_REGION_BASIC_INFO_64,
+            reinterpret_cast<vm_region_info_t>(&info),
+            &infoCount,
+            &objectName
+        );
+        if (objectName != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), objectName);
+        }
+        if (result != KERN_SUCCESS || regionAddress > current || regionSize == 0) {
+            return false;
+        }
+        if ((info.protection & VM_PROT_READ) == 0) {
+            return false;
+        }
+
+        const mach_vm_address_t next = regionAddress + regionSize;
+        if (next <= current) {
+            return false;
+        }
+        current = next;
+    }
+
+    return true;
+}
+
+bool checkedRangeEnd(uintptr_t start, size_t length, uintptr_t &end) {
+    if (length == 0 || start > UINTPTR_MAX - length) {
+        return false;
+    }
+
+    end = start + length;
+    return true;
+}
+
+bool rangeContains(uintptr_t outerStart, size_t outerLength, uintptr_t innerStart, size_t innerLength) {
+    uintptr_t outerEnd = 0;
+    uintptr_t innerEnd = 0;
+    if (!checkedRangeEnd(outerStart, outerLength, outerEnd) ||
+        !checkedRangeEnd(innerStart, innerLength, innerEnd)) {
+        return false;
+    }
+
+    return innerStart >= outerStart && innerEnd <= outerEnd;
+}
+
+int64_t signExtend(uint64_t value, unsigned bitCount) {
+    const uint64_t signBit = 1ULL << (bitCount - 1);
+    const uint64_t mask = (1ULL << bitCount) - 1;
+    value &= mask;
+    return static_cast<int64_t>((value ^ signBit) - signBit);
+}
+
+bool decodeADRPPage(uint32_t instruction, uintptr_t instructionAddress, uintptr_t &pageAddress) {
+    if ((instruction & 0x9f000000) != 0x90000000) {
+        return false;
+    }
+
+    const uint64_t immLo = (instruction >> 29) & 0x3;
+    const uint64_t immHi = (instruction >> 5) & 0x7ffff;
+    const int64_t pageOffset = signExtend((immHi << 2) | immLo, 21) << 12;
+    const auto page = static_cast<intptr_t>(instructionAddress & ~uintptr_t(0xfff));
+    pageAddress = static_cast<uintptr_t>(page + pageOffset);
+    return true;
+}
+
+bool decodeLDRUnsignedImmediate64(uint32_t instruction, uint32_t &targetRegister, uint32_t &baseRegister, uintptr_t &offset) {
+    if ((instruction & 0xffc00000) != 0xf9400000) {
+        return false;
+    }
+
+    targetRegister = instruction & 0x1f;
+    baseRegister = (instruction >> 5) & 0x1f;
+    offset = static_cast<uintptr_t>((instruction >> 10) & 0xfff) << 3;
+    return true;
+}
+
+bool decodeCBZTarget64(uint32_t instruction, uintptr_t instructionAddress, uint32_t &targetRegister, uintptr_t &targetAddress) {
+    if ((instruction & 0xff000000) != 0xb4000000) {
+        return false;
+    }
+
+    const int64_t offset = signExtend((instruction >> 5) & 0x7ffff, 19) << 2;
+    targetRegister = instruction & 0x1f;
+    targetAddress = static_cast<uintptr_t>(static_cast<intptr_t>(instructionAddress) + offset);
+    return true;
+}
+
+bool isBranchRegister(uint32_t instruction, uint32_t targetRegister) {
+    return instruction == (0xd61f0000 | (targetRegister << 5));
+}
+
+uintptr_t resolveParseRevokeXMLHookSlot(uintptr_t originalBodyAddress, uintptr_t imageStart, size_t imageSize) {
+    if (originalBodyAddress < arm64StubLength || imageSize == 0) {
+        return 0;
+    }
+
+    const uintptr_t stubAddress = originalBodyAddress - arm64StubLength;
+    if (!rangeContains(imageStart, imageSize, stubAddress, arm64StubLength) ||
+        !isAddressRangeReadable(reinterpret_cast<const void *>(stubAddress), arm64StubLength)) {
+        return 0;
+    }
+
+    const auto *instructions = reinterpret_cast<const uint32_t *>(stubAddress);
+    const uint32_t adrp = instructions[0];
+    const uint32_t ldr = instructions[1];
+    const uint32_t cbz = instructions[2];
+    const uint32_t br = instructions[3];
+
+    uintptr_t pageAddress = 0;
+    if (!decodeADRPPage(adrp, stubAddress, pageAddress)) {
+        return 0;
+    }
+
+    uint32_t ldrTargetRegister = 0;
+    uint32_t ldrBaseRegister = 0;
+    uintptr_t ldrOffset = 0;
+    if (!decodeLDRUnsignedImmediate64(ldr, ldrTargetRegister, ldrBaseRegister, ldrOffset)) {
+        return 0;
+    }
+
+    uint32_t cbzRegister = 0;
+    uintptr_t cbzTargetAddress = 0;
+    if (!decodeCBZTarget64(cbz, stubAddress + 8, cbzRegister, cbzTargetAddress)) {
+        return 0;
+    }
+
+    if (ldrTargetRegister != ldrBaseRegister ||
+        cbzRegister != ldrTargetRegister ||
+        cbzTargetAddress != originalBodyAddress ||
+        !isBranchRegister(br, ldrTargetRegister)) {
+        return 0;
+    }
+
+    const uintptr_t hookSlot = pageAddress + ldrOffset;
+    if (!rangeContains(imageStart, imageSize, hookSlot, sizeof(void *)) ||
+        !isAddressRangeReadable(reinterpret_cast<const void *>(hookSlot), sizeof(void *))) {
+        return 0;
+    }
+
+    return hookSlot;
+}
+
+bool imageAddressRangeForHeader(const mach_header *header, intptr_t slide, uintptr_t &imageStart, size_t &imageSize) {
+    if (header == nullptr || header->magic != MH_MAGIC_64) {
+        return false;
+    }
+
+    const auto *header64 = reinterpret_cast<const mach_header_64 *>(header);
+    const uint8_t *cursor = reinterpret_cast<const uint8_t *>(header64) + sizeof(mach_header_64);
+    uintptr_t lowest = UINTPTR_MAX;
+    uintptr_t highest = 0;
+
+    for (uint32_t index = 0; index < header64->ncmds; index += 1) {
+        const auto *command = reinterpret_cast<const load_command *>(cursor);
+        if (command->cmd == LC_SEGMENT_64) {
+            const auto *segment = reinterpret_cast<const segment_command_64 *>(cursor);
+            if (segment->vmsize != 0) {
+                const uintptr_t start = static_cast<uintptr_t>(slide + segment->vmaddr);
+                const uintptr_t end = start + static_cast<uintptr_t>(segment->vmsize);
+                if (start < lowest) {
+                    lowest = start;
+                }
+                if (end > highest) {
+                    highest = end;
+                }
+            }
+        }
+        cursor += command->cmdsize;
+    }
+
+    if (lowest == UINTPTR_MAX || highest <= lowest) {
+        return false;
+    }
+
+    imageStart = lowest;
+    imageSize = highest - lowest;
+    return true;
 }
 
 bool isDigit(char character) {
@@ -634,12 +885,25 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
     }
 
     const bool result = originalParseRevokeXML(message, xml, flag, msgType);
-    if (!result || message == nullptr) {
+    if (!result || message == nullptr || xml == nullptr) {
+        return result;
+    }
+    if (!shouldInspectRevokeMessageFields(xml)) {
         return result;
     }
 
-    auto *newMsgId = reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(message) + revokeNewMsgIdOffset);
-    auto *replaceMsg = reinterpret_cast<std::string *>(reinterpret_cast<uint8_t *>(message) + revokeReplaceMsgOffset);
+    const auto *config = activeRevokeHookConfig;
+    if (config == nullptr) {
+        return result;
+    }
+
+    auto *newMsgId = reinterpret_cast<uint64_t *>(reinterpret_cast<uint8_t *>(message) + config->newMsgIdOffset);
+    auto *replaceMsg = reinterpret_cast<std::string *>(reinterpret_cast<uint8_t *>(message) + config->replaceMsgOffset);
+    if (!isAddressRangeReadable(newMsgId, sizeof(*newMsgId)) ||
+        !isAddressRangeReadable(replaceMsg, sizeof(*replaceMsg))) {
+        return result;
+    }
+
     const uint64_t originalNewMsgId = *newMsgId;
     const std::string originalReplaceMsg = *replaceMsg;
 
@@ -659,7 +923,13 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
     return result;
 }
 
-uintptr_t findWeChatDylibSlide() {
+struct WeChatDylibImage {
+    uintptr_t slide;
+    uintptr_t start;
+    size_t size;
+};
+
+bool findWeChatDylibImage(WeChatDylibImage &image) {
     const uint32_t imageCount = _dyld_image_count();
     for (uint32_t index = 0; index < imageCount; index += 1) {
         const char *imageName = _dyld_get_image_name(index);
@@ -668,17 +938,55 @@ uintptr_t findWeChatDylibSlide() {
         }
 
         if (isTargetWeChatDylibPath(imageName)) {
-            return static_cast<uintptr_t>(_dyld_get_image_vmaddr_slide(index));
+            const auto slide = _dyld_get_image_vmaddr_slide(index);
+            uintptr_t start = 0;
+            size_t size = 0;
+            if (!imageAddressRangeForHeader(_dyld_get_image_header(index), slide, start, size)) {
+                return false;
+            }
+
+            image = {
+                static_cast<uintptr_t>(slide),
+                start,
+                size,
+            };
+            return true;
         }
     }
 
-    return 0;
+    return false;
 }
 
 bool writeHookSlot(void **slot, void *replacement) {
+    if (slot == nullptr || replacement == nullptr || !isAddressRangeReadable(slot, sizeof(void *))) {
+        return false;
+    }
+
+    mach_vm_address_t regionAddress = reinterpret_cast<mach_vm_address_t>(slot);
+    mach_vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t info = {};
+    mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    const kern_return_t regionResult = mach_vm_region(
+        mach_task_self(),
+        &regionAddress,
+        &regionSize,
+        VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&info),
+        &infoCount,
+        &objectName
+    );
+    if (objectName != MACH_PORT_NULL) {
+        mach_port_deallocate(mach_task_self(), objectName);
+    }
+    if (regionResult != KERN_SUCCESS) {
+        return false;
+    }
+
     const auto pageSize = static_cast<uintptr_t>(sysconf(_SC_PAGESIZE));
     const auto slotAddress = reinterpret_cast<uintptr_t>(slot);
     const auto pageStart = slotAddress & ~(pageSize - 1);
+    void *originalValue = *slot;
 
     const kern_return_t result = vm_protect(
         mach_task_self(),
@@ -692,22 +1000,54 @@ bool writeHookSlot(void **slot, void *replacement) {
     }
 
     *slot = replacement;
-    return true;
+    const bool wroteReplacement = *slot == replacement;
+    if (!wroteReplacement) {
+        *slot = originalValue;
+    }
+
+    vm_protect(
+        mach_task_self(),
+        static_cast<vm_address_t>(pageStart),
+        static_cast<vm_size_t>(pageSize),
+        false,
+        info.protection
+    );
+
+    return wroteReplacement;
 }
 
 void installRevokeTipHook() {
-    const uintptr_t slide = findWeChatDylibSlide();
-    if (slide == 0) {
+    WeChatDylibImage image = {};
+    if (!findWeChatDylibImage(image)) {
         return;
     }
 
-    auto **hookSlot = reinterpret_cast<void **>(slide + parseRevokeXMLHookSlot);
+    const std::string buildVersion = currentBundleBuildVersion();
+    const auto *config = revokeHookConfigForBuild(buildVersion.c_str());
+    if (config == nullptr) {
+        return;
+    }
+
+    const uintptr_t originalBodyAddress = image.slide + config->originalBody;
+    const uintptr_t hookSlotAddress = resolveParseRevokeXMLHookSlot(originalBodyAddress, image.start, image.size);
+    if (hookSlotAddress == 0) {
+        return;
+    }
+
+    auto **hookSlot = reinterpret_cast<void **>(hookSlotAddress);
+    if (!isAddressRangeReadable(hookSlot, sizeof(*hookSlot))) {
+        return;
+    }
     if (*hookSlot == reinterpret_cast<void *>(&hookedParseRevokeXML)) {
         return;
     }
 
-    originalParseRevokeXML = reinterpret_cast<ParseRevokeXML>(slide + parseRevokeXMLOriginalBody);
-    writeHookSlot(hookSlot, reinterpret_cast<void *>(&hookedParseRevokeXML));
+    originalParseRevokeXML = reinterpret_cast<ParseRevokeXML>(originalBodyAddress);
+    activeRevokeHookConfig = config;
+    if (!writeHookSlot(hookSlot, reinterpret_cast<void *>(&hookedParseRevokeXML))) {
+        originalParseRevokeXML = nullptr;
+        activeRevokeHookConfig = nullptr;
+    }
 }
 
 } // namespace
@@ -755,6 +1095,31 @@ void wechat_antirecall_free(void *pointer) {
 
 int wechat_antirecall_is_target_wechat_dylib_path(const char *imagePath) {
     return isTargetWeChatDylibPath(imagePath) ? 1 : 0;
+}
+
+uintptr_t wechat_antirecall_revoke_hook_original_body_for_build(const char *buildVersion) {
+    return revokeHookOriginalBodyForBuild(buildVersion);
+}
+
+int wechat_antirecall_should_inspect_revoke_message_fields(const char *xml) {
+    if (xml == nullptr) {
+        return 0;
+    }
+
+    const std::string xmlString = xml;
+    return shouldInspectRevokeMessageFields(&xmlString) ? 1 : 0;
+}
+
+uintptr_t wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
+    uintptr_t originalBodyAddress,
+    uintptr_t imageStart,
+    uintptr_t imageSize
+) {
+    return resolveParseRevokeXMLHookSlot(originalBodyAddress, imageStart, static_cast<size_t>(imageSize));
+}
+
+int wechat_antirecall_is_address_range_readable(uintptr_t address, uintptr_t length) {
+    return isAddressRangeReadable(reinterpret_cast<const void *>(address), static_cast<size_t>(length)) ? 1 : 0;
 }
 
 __attribute__((constructor))

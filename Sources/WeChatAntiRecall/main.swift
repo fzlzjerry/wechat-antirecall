@@ -1304,7 +1304,7 @@ struct RuntimeTipInstaller {
     static let installName = "@loader_path/\(dylibFileName)"
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
-    static let supportedBuildVersion = "268597"
+    static let supportedBuildVersions = ["268597", "268599"]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL
@@ -1318,9 +1318,9 @@ struct RuntimeTipInstaller {
         guard options.runtimeTip else {
             throw ToolError.invalidConfig("runtime-tip 未启用")
         }
-        guard appInfo.buildVersion == Self.supportedBuildVersion else {
+        guard Self.supportedBuildVersions.contains(appInfo.buildVersion) else {
             throw ToolError.invalidConfig(
-                "runtime-tip 目前只支持微信构建号 \(Self.supportedBuildVersion)，当前构建号是 \(appInfo.buildVersion)"
+                "runtime-tip 目前只支持微信构建号 \(Self.supportedBuildVersions.joined(separator: ", "))，当前构建号是 \(appInfo.buildVersion)"
             )
         }
 

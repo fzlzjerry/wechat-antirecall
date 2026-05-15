@@ -70,6 +70,14 @@ final class MachODylibInjectorTests: XCTestCase {
     }
 
     func testRuntimeInstallerCopiesDylibAndInjectsHostBinary() throws {
+        try assertRuntimeInstallerCopiesDylibAndInjectsHostBinary(buildVersion: "268597")
+    }
+
+    func testRuntimeInstallerSupportsBuild268599() throws {
+        try assertRuntimeInstallerCopiesDylibAndInjectsHostBinary(buildVersion: "268599")
+    }
+
+    private func assertRuntimeInstallerCopiesDylibAndInjectsHostBinary(buildVersion: String) throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wechat-antirecall-runtime-\(UUID().uuidString)", isDirectory: true)
         defer {
@@ -90,7 +98,7 @@ final class MachODylibInjectorTests: XCTestCase {
             appURL: directory.appendingPathComponent("WeChat.app"),
             executableURL: directory.appendingPathComponent("WeChat.app/Contents/MacOS/WeChat"),
             shortVersion: "4.1.9",
-            buildVersion: "268597",
+            buildVersion: buildVersion,
             bundleIdentifier: "com.tencent.xinWeChat"
         )
         let options = try InstallOptions(["--runtime-dylib", sourceDylibURL.path])
@@ -129,7 +137,7 @@ final class MachODylibInjectorTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeTipInstaller(appInfo: appInfo, options: options)) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597，当前构建号是 268596"
+                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597, 268599，当前构建号是 268596"
             )
         }
     }
