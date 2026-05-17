@@ -168,6 +168,7 @@ final class RuntimeRewriteTests: XCTestCase {
     func testBuildSpecificRevokeHookOriginalBodyLookup() {
         XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268597"), 0x4764540)
         XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268599"), 0x47775cc)
+        XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268601"), 0x47813f0)
         XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build("268596"), 0)
         XCTAssertEqual(wechat_antirecall_revoke_hook_original_body_for_build(nil), 0)
     }

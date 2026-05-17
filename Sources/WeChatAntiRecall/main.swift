@@ -1304,7 +1304,7 @@ struct RuntimeTipInstaller {
     static let installName = "@loader_path/\(dylibFileName)"
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
-    static let supportedBuildVersions = ["268597", "268599"]
+    static let supportedBuildVersions = ["268597", "268599", "268601"]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL

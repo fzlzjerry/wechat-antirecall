@@ -33,6 +33,7 @@ struct RevokeHookConfig {
 constexpr RevokeHookConfig revokeHookConfigs[] = {
     {"268597", 0x4764540, 0x168, 0x170},
     {"268599", 0x47775cc, 0x168, 0x170},
+    {"268601", 0x47813f0, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
