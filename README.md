@@ -34,9 +34,6 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 
 | 构建号 | 架构 | 支持能力 | 补丁目标 |
 | --- | --- | --- | --- |
-| 31927, 31960, 32281, 32288, 34371 | arm64 | 静默防撤回 | `Contents/MacOS/WeChat` |
-| 34817 | x86_64 | 静默防撤回 | `Contents/MacOS/WeChat` |
-| 36559 | x86_64 | 静默防撤回 | `Contents/Frameworks/wechat.dylib` |
 | 268575 | arm64 | 静默防撤回、提示模式、多开、屏蔽更新 | `Contents/MacOS/WeChat`、`Contents/Resources/wechat.dylib` |
 | 268596 | arm64 | 静默防撤回、提示模式、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268597 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
@@ -212,8 +209,11 @@ codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/Resourc
 codesign --verify --deep --strict --verbose=2 /Applications/WeChat.app
 ```
 
-旧版本如果 patch 的是主二进制或 `Contents/Frameworks/wechat.dylib`，请把第一条命令
-换成对应的补丁目标。
+如果安装了 `--multi-instance`，还会修改主二进制，可额外检查：
+
+```bash
+codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/MacOS/WeChat
+```
 
 安装 `--runtime-tip` 后可以额外检查 runtime dylib：
 
@@ -234,7 +234,7 @@ sudo .build/release/wechat-antirecall restore \
   --app /Applications/WeChat.app
 ```
 
-旧版本如果补丁目标是主二进制，改用：
+如果要恢复 `--multi-instance` 涉及的主二进制备份，改用：
 
 ```bash
 sudo .build/release/wechat-antirecall restore \
@@ -324,17 +324,17 @@ sudo .build/release/wechat-antirecall install --runtime-dylib .build/release/lib
 
 ```json
 {
-  "version": "36559",
+  "version": "268596",
   "targets": [
     {
       "identifier": "revoke",
-      "binary": "Contents/Frameworks/wechat.dylib",
+      "binary": "Contents/Resources/wechat.dylib",
       "entries": [
         {
-          "arch": "x86_64",
-          "addr": "4B51260",
-          "expected": "B001000000C3",
-          "asm": "B801000000C3"
+          "arch": "arm64",
+          "addr": "47647a0",
+          "expected": "E00F0034",
+          "asm": "7F000014"
         }
       ]
     }
