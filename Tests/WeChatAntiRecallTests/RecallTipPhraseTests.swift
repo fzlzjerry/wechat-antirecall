@@ -132,6 +132,31 @@ final class RecallTipPhraseTests: XCTestCase {
         XCTAssertNil(resetPlist[RecallTipPreferenceStore.key])
     }
 
+    func testPreferenceStoreCanWriteCloneBundleDomain() throws {
+        let homeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: homeDirectory)
+        }
+
+        let store = RecallTipPreferenceStore(
+            homeDirectory: homeDirectory,
+            domain: "com.tencent.xinWeChat.antirecall.clone1"
+        )
+        let phrase = try RecallTipPhrase("clone 1 phrase")
+
+        try store.save(phrase)
+
+        XCTAssertEqual(try store.load(), phrase)
+        XCTAssertEqual(
+            store.preferenceFileURL.path,
+            homeDirectory
+                .appendingPathComponent("Library/Containers/com.tencent.xinWeChat.antirecall.clone1/Data/Library/Preferences")
+                .appendingPathComponent("com.tencent.xinWeChat.antirecall.clone1.plist")
+                .path
+        )
+    }
+
     func testPreferenceStoreWritesProbeFlag() throws {
         let homeDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)

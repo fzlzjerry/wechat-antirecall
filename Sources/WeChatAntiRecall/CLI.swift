@@ -358,10 +358,13 @@ struct RecallTipPreferenceStore {
 
     let preferenceFileURL: URL
 
-    init(homeDirectory: URL = RecallTipPreferenceStore.defaultHomeDirectory()) {
+    init(
+        homeDirectory: URL = RecallTipPreferenceStore.defaultHomeDirectory(),
+        domain: String = RecallTipPreferenceStore.domain
+    ) {
         preferenceFileURL = homeDirectory
-            .appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences")
-            .appendingPathComponent("\(Self.domain).plist")
+            .appendingPathComponent("Library/Containers/\(domain)/Data/Library/Preferences")
+            .appendingPathComponent("\(domain).plist")
     }
 
     func load() throws -> RecallTipPhrase? {
@@ -478,6 +481,8 @@ struct CLI {
             try versions(rest)
         case "install", "patch":
             try install(rest)
+        case "clone":
+            try clone(rest)
         case "restore":
             try restore(rest)
         case "tip-phrase":
@@ -486,6 +491,27 @@ struct CLI {
             printUsage()
         default:
             throw ToolError.usage("未知命令：\(command)。运行 `wechat-antirecall help` 查看用法。")
+        }
+    }
+
+    private func clone(_ arguments: [String]) throws {
+        let options = try CloneOptions(arguments)
+        let appInfo = try readAppInfo(appPath: options.appPath)
+        let specs = try WeChatCloneInstaller().install(appInfo: appInfo, options: options)
+
+        print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
+        print(options.dryRun ? "Mode: dry-run (clone app bundle)" : "Mode: clone app bundle")
+        print("Source: \(appInfo.appURL.path)")
+        for spec in specs {
+            print("Clone \(spec.index): \(spec.destinationURL.path)")
+            print("  Bundle: \(spec.bundleIdentifier)")
+            print(options.keepURLSchemes ? "  URL schemes: preserved" : "  URL schemes: removed")
+        }
+
+        if options.dryRun {
+            print("Dry-run complete. No files were changed.")
+        } else {
+            print("Clone complete.")
         }
     }
 
@@ -734,6 +760,7 @@ struct CLI {
         Usage:
           wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json]
           wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip] [--runtime-tip] [--runtime-dylib <path>] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
+          wechat-antirecall clone    [--app /Applications/WeChat.app] [--output-dir /Applications] [--count 2] [--name-prefix WeChat] [--keep-url-schemes] [--replace] [--dry-run] [--skip-resign]
           wechat-antirecall restore  --backup <path> [--binary Contents/MacOS/WeChat] [--app /Applications/WeChat.app] [--skip-resign]
           wechat-antirecall tip-phrase get
           wechat-antirecall tip-phrase set <phrase>
@@ -1447,7 +1474,9 @@ private func readAppInfo(appPath: String) throws -> AppInfo {
     guard let bundleIdentifier = plist["CFBundleIdentifier"] as? String else {
         throw ToolError.appInfoMissing("CFBundleIdentifier")
     }
-    guard bundleIdentifier == "com.tencent.xinWeChat" || bundleIdentifier == "com.tencent.xin" else {
+    let isOfficialWechat = bundleIdentifier == "com.tencent.xinWeChat" || bundleIdentifier == "com.tencent.xin"
+    let isToolClone = WeChatCloneMetadata.isAcceptedClone(plist: plist, bundleIdentifier: bundleIdentifier)
+    guard isOfficialWechat || isToolClone else {
         throw ToolError.notAWechatApp(appPath)
     }
 
@@ -1597,7 +1626,7 @@ private func makeBackup(of fileURL: URL) throws -> URL {
     return backupURL
 }
 
-private func resign(appURL: URL, nestedBinaries: [URL]) throws {
+func resign(appURL: URL, nestedBinaries: [URL]) throws {
     for binaryURL in uniqueURLs(nestedBinaries) {
         try signMachO(at: binaryURL)
     }

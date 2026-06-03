@@ -741,25 +741,52 @@ NSNumber *probeFlagFromPlist(NSString *plistPath) {
     return probeFlagFromValue(preferences[revokeTipDebugProbePreferenceKey()]);
 }
 
-NSArray<NSString *> *preferencePlistPaths(NSString *homeDirectory) {
+NSString *originalWechatBundleIdentifier() {
+    return @"com.tencent.xinWeChat";
+}
+
+NSString *currentBundleIdentifier() {
+    NSString *bundleIdentifier = [[NSBundle mainBundle] bundleIdentifier];
+    if (bundleIdentifier.length == 0) {
+        return originalWechatBundleIdentifier();
+    }
+    return bundleIdentifier;
+}
+
+bool isAntiRecallCloneBundleIdentifier(NSString *bundleIdentifier) {
+    return [bundleIdentifier hasPrefix:@"com.tencent.xinWeChat.antirecall.clone"];
+}
+
+NSArray<NSString *> *preferencePlistPathsForBundle(NSString *homeDirectory, NSString *bundleIdentifier) {
     if (homeDirectory.length == 0) {
+        return @[];
+    }
+    if (bundleIdentifier.length == 0) {
         return @[];
     }
 
     return @[
-        [homeDirectory stringByAppendingPathComponent:@"Library/Preferences/com.tencent.xinWeChat.plist"],
-        [homeDirectory stringByAppendingPathComponent:@"Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences/com.tencent.xinWeChat.plist"],
+        [homeDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Preferences/%@.plist", bundleIdentifier]],
+        [homeDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Containers/%@/Data/Library/Preferences/%@.plist", bundleIdentifier, bundleIdentifier]],
     ];
 }
 
-NSString *phraseFromPreferencePlists(NSString *homeDirectory) {
-    for (NSString *plistPath in preferencePlistPaths(homeDirectory)) {
+NSArray<NSString *> *preferencePlistPaths(NSString *homeDirectory) {
+    return preferencePlistPathsForBundle(homeDirectory, originalWechatBundleIdentifier());
+}
+
+NSString *phraseFromPreferencePlistsForBundle(NSString *homeDirectory, NSString *bundleIdentifier) {
+    for (NSString *plistPath in preferencePlistPathsForBundle(homeDirectory, bundleIdentifier)) {
         NSString *phrase = phraseFromPlist(plistPath);
         if (phrase != nil) {
             return phrase;
         }
     }
     return nil;
+}
+
+NSString *phraseFromPreferencePlists(NSString *homeDirectory) {
+    return phraseFromPreferencePlistsForBundle(homeDirectory, originalWechatBundleIdentifier());
 }
 
 NSNumber *probeFlagFromPreferencePlists(NSString *homeDirectory) {
@@ -772,41 +799,61 @@ NSNumber *probeFlagFromPreferencePlists(NSString *homeDirectory) {
     return nil;
 }
 
-NSString *configuredPhraseForHomeDirectory(NSString *homeDirectory) {
+NSNumber *probeFlagFromPreferencePlistsForBundle(NSString *homeDirectory, NSString *bundleIdentifier) {
+    for (NSString *plistPath in preferencePlistPathsForBundle(homeDirectory, bundleIdentifier)) {
+        NSNumber *probeEnabled = probeFlagFromPlist(plistPath);
+        if (probeEnabled != nil) {
+            return probeEnabled;
+        }
+    }
+    return nil;
+}
+
+NSString *configuredPhraseForHomeDirectoryAndBundle(NSString *homeDirectory, NSString *bundleIdentifier) {
     NSString *phrase = phraseFromDefaults([NSUserDefaults standardUserDefaults]);
     if (phrase != nil) {
         return phrase;
     }
 
-    NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.tencent.xinWeChat"];
+    NSString *effectiveBundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : originalWechatBundleIdentifier();
+    NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:effectiveBundleIdentifier];
     phrase = phraseFromDefaults(suiteDefaults);
     if (phrase != nil) {
         return phrase;
     }
 
     NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
-    phrase = phraseFromPreferencePlists(home);
+    phrase = phraseFromPreferencePlistsForBundle(home, effectiveBundleIdentifier);
     if (phrase != nil) {
         return phrase;
+    }
+
+    if (isAntiRecallCloneBundleIdentifier(effectiveBundleIdentifier)) {
+        return defaultRevokeTipPhrase();
     }
 
     return defaultRevokeTipPhrase();
 }
 
-bool debugProbeEnabledForHomeDirectory(NSString *homeDirectory) {
+NSString *configuredPhraseForHomeDirectory(NSString *homeDirectory) {
+    return configuredPhraseForHomeDirectoryAndBundle(homeDirectory, currentBundleIdentifier());
+}
+
+bool debugProbeEnabledForHomeDirectoryAndBundle(NSString *homeDirectory, NSString *bundleIdentifier) {
     NSNumber *probeEnabled = probeFlagFromDefaults([NSUserDefaults standardUserDefaults]);
     if (probeEnabled != nil) {
         return [probeEnabled boolValue];
     }
 
-    NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.tencent.xinWeChat"];
+    NSString *effectiveBundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : originalWechatBundleIdentifier();
+    NSUserDefaults *suiteDefaults = [[NSUserDefaults alloc] initWithSuiteName:effectiveBundleIdentifier];
     probeEnabled = probeFlagFromDefaults(suiteDefaults);
     if (probeEnabled != nil) {
         return [probeEnabled boolValue];
     }
 
     NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
-    probeEnabled = probeFlagFromPreferencePlists(home);
+    probeEnabled = probeFlagFromPreferencePlistsForBundle(home, effectiveBundleIdentifier);
     if (probeEnabled != nil) {
         return [probeEnabled boolValue];
     }
@@ -814,9 +861,24 @@ bool debugProbeEnabledForHomeDirectory(NSString *homeDirectory) {
     return false;
 }
 
+bool debugProbeEnabledForHomeDirectory(NSString *homeDirectory) {
+    return debugProbeEnabledForHomeDirectoryAndBundle(homeDirectory, currentBundleIdentifier());
+}
+
 NSString *configuredPhraseFromPreferencePlistsForHomeDirectory(NSString *homeDirectory) {
     NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
     NSString *phrase = phraseFromPreferencePlists(home);
+    if (phrase != nil) {
+        return phrase;
+    }
+
+    return defaultRevokeTipPhrase();
+}
+
+NSString *configuredPhraseFromPreferencePlistsForHomeDirectoryAndBundle(NSString *homeDirectory, NSString *bundleIdentifier) {
+    NSString *home = homeDirectory.length > 0 ? homeDirectory : NSHomeDirectory();
+    NSString *effectiveBundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : originalWechatBundleIdentifier();
+    NSString *phrase = phraseFromPreferencePlistsForBundle(home, effectiveBundleIdentifier);
     if (phrase != nil) {
         return phrase;
     }
@@ -1083,6 +1145,14 @@ char *wechat_antirecall_load_revoke_tip_phrase_for_home_copy(const char *homeDir
     @autoreleasepool {
         NSString *home = homeDirectory == nullptr ? nil : [NSString stringWithUTF8String:homeDirectory];
         return copyNSString(configuredPhraseFromPreferencePlistsForHomeDirectory(home));
+    }
+}
+
+char *wechat_antirecall_load_revoke_tip_phrase_for_home_and_bundle_copy(const char *homeDirectory, const char *bundleIdentifier) {
+    @autoreleasepool {
+        NSString *home = homeDirectory == nullptr ? nil : [NSString stringWithUTF8String:homeDirectory];
+        NSString *bundle = bundleIdentifier == nullptr ? nil : [NSString stringWithUTF8String:bundleIdentifier];
+        return copyNSString(configuredPhraseFromPreferencePlistsForHomeDirectoryAndBundle(home, bundle));
     }
 }
 

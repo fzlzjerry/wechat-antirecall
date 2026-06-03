@@ -122,6 +122,48 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(try loadConfiguredPhrase(homeDirectory: homeDirectory), phrase)
     }
 
+    func testLoadsConfiguredPhraseFromCloneContainerBeforeOriginalDomain() throws {
+        let homeDirectory = try makeTemporaryDirectory()
+        try writePhrase(
+            "original phrase",
+            to: homeDirectory
+                .appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences")
+                .appendingPathComponent("com.tencent.xinWeChat.plist")
+        )
+        try writePhrase(
+            "clone phrase",
+            to: homeDirectory
+                .appendingPathComponent("Library/Containers/com.tencent.xinWeChat.antirecall.clone1/Data/Library/Preferences")
+                .appendingPathComponent("com.tencent.xinWeChat.antirecall.clone1.plist")
+        )
+
+        XCTAssertEqual(
+            try loadConfiguredPhrase(
+                homeDirectory: homeDirectory,
+                bundleIdentifier: "com.tencent.xinWeChat.antirecall.clone1"
+            ),
+            "clone phrase"
+        )
+    }
+
+    func testCloneBundleDoesNotFallBackToOriginalWechatPhrase() throws {
+        let homeDirectory = try makeTemporaryDirectory()
+        try writePhrase(
+            "original phrase",
+            to: homeDirectory
+                .appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences")
+                .appendingPathComponent("com.tencent.xinWeChat.plist")
+        )
+
+        XCTAssertEqual(
+            try loadConfiguredPhrase(
+                homeDirectory: homeDirectory,
+                bundleIdentifier: "com.tencent.xinWeChat.antirecall.clone1"
+            ),
+            "已拦截一条撤回消息"
+        )
+    }
+
     func testLoadsConfiguredPhraseFromSandboxDataHome() throws {
         let homeDirectory = try makeTemporaryDirectory()
             .appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data", isDirectory: true)
@@ -277,6 +319,18 @@ final class RuntimeRewriteTests: XCTestCase {
 
     private func loadConfiguredPhrase(homeDirectory: URL) throws -> String {
         let pointer = wechat_antirecall_load_revoke_tip_phrase_for_home_copy(homeDirectory.path)
+        let unwrapped = try XCTUnwrap(pointer)
+        defer {
+            wechat_antirecall_free(unwrapped)
+        }
+        return String(cString: unwrapped)
+    }
+
+    private func loadConfiguredPhrase(homeDirectory: URL, bundleIdentifier: String) throws -> String {
+        let pointer = wechat_antirecall_load_revoke_tip_phrase_for_home_and_bundle_copy(
+            homeDirectory.path,
+            bundleIdentifier
+        )
         let unwrapped = try XCTUnwrap(pointer)
         defer {
             wechat_antirecall_free(unwrapped)
