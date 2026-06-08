@@ -149,7 +149,7 @@ final class MachODylibInjectorTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeTipInstaller(appInfo: appInfo, options: options)) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597, 268599, 268601, 268602, 268831，当前构建号是 268596"
+                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597, 268599, 268601, 268602, 268831, 268849, 268850，当前构建号是 268596"
             )
         }
     }

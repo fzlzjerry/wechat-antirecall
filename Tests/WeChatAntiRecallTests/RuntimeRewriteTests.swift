@@ -104,7 +104,9 @@ final class RuntimeRewriteTests: XCTestCase {
     }
 
     func testRendersConfiguredPhraseWithoutSenderWhenSenderIsUnknown() throws {
-        let rendered = try render(original: "You recalled a message.", phrase: "已拦截 {from} 撤回的一条消息")
+        // A recall whose sender cannot be parsed (no name before the verb) but which is
+        // not a self-recall: still rewritten, with an empty {from}.
+        let rendered = try render(original: "撤回了一条消息", phrase: "已拦截 {from} 撤回的一条消息")
 
         XCTAssertEqual(rendered, "已拦截  撤回的一条消息")
     }
@@ -284,6 +286,34 @@ final class RuntimeRewriteTests: XCTestCase {
     func testAddressRangeReadableRejectsUnmappedGap() {
         XCTAssertEqual(wechat_antirecall_is_address_range_readable(0, 1), 0)
         XCTAssertEqual(wechat_antirecall_is_address_range_readable(0x1, 16), 0)
+    }
+
+    func testLeavesEnglishSelfRecallTipUnchanged() throws {
+        // Recalling your own message must not be rewritten to the anti-recall tip.
+        let rendered = try render(original: "You recalled a message", phrase: "已拦截 {from} 于 {time} 撤回的一条消息")
+        XCTAssertEqual(rendered, "You recalled a message")
+    }
+
+    func testLeavesChineseSelfRecallTipUnchanged() throws {
+        let rendered = try render(original: "你撤回了一条消息", phrase: "已拦截 {from} 于 {time} 撤回的一条消息")
+        XCTAssertEqual(rendered, "你撤回了一条消息")
+    }
+
+    func testExtractsNewMsgIdFromRevokeXML() throws {
+        // The self-recall fix restores newMsgId from the XML, so the tag extraction must
+        // pull <newmsgid> out of a representative revoke sysmsg.
+        let xml = "<sysmsg type=\"revokemsg\"><revokemsg><session>x</session>"
+            + "<oldmsgid>111</oldmsgid><msgid>222</msgid><newmsgid>9876543210123</newmsgid>"
+            + "<replacemsg><![CDATA[\"张三\" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>"
+        XCTAssertEqual(wechat_antirecall_revoke_newmsgid_from_xml(xml), 9876543210123)
+        XCTAssertEqual(wechat_antirecall_revoke_newmsgid_from_xml("<x>no id here</x>"), 0)
+    }
+
+    func testStillRewritesOtherPersonRecall() throws {
+        // A recall by someone else is still rewritten (guards against the self-recall
+        // check over-matching). 张三 is not a self-recall marker.
+        let rendered = try render(original: "张三撤回了一条消息", phrase: "已拦截 {from} 撤回的一条消息")
+        XCTAssertEqual(rendered, "已拦截 张三 撤回的一条消息")
     }
 
     private func render(original: String, phrase: String) throws -> String {

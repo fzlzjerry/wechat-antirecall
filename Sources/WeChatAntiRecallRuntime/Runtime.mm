@@ -5,6 +5,8 @@
 #include <mach-o/loader.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <libkern/OSCacheControl.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -38,8 +40,35 @@ constexpr RevokeHookConfig revokeHookConfigs[] = {
     {"268831", 0x48f6d7c, 0x168, 0x170},
 };
 
+// Builds whose parseRevokeXML has NO WeChat dispatch stub (the compiler dropped the
+// hot-patch trampolines). These are hooked with a static entry rewrite + a runtime
+// trampoline instead. `savedInstructions` are the original first 3 instruction words
+// at `entryOffset` (overwritten by the static `adrp/ldr/br` stub at install time);
+// the trampoline replays them and jumps to `continuationOffset` (= entryOffset + 12).
+constexpr size_t inlineSavedInstructionCount = 3;
+
+struct InlineRevokeHookConfig {
+    const char *buildVersion;
+    uintptr_t entryOffset;
+    uint32_t savedInstructions[inlineSavedInstructionCount];
+    uintptr_t continuationOffset;
+    ptrdiff_t newMsgIdOffset;
+    ptrdiff_t replaceMsgOffset;
+};
+
+constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
+    // 268849 (WeChat 4.1.10): entry stp x24,x23,[sp,#-0x40]! / stp x22,x21 / stp x20,x19.
+    {"268849", 0x488c4c4, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x488c4d0, 0x168, 0x170},
+    // 268850 (WeChat 4.1.10 hotfix): byte-identical to 268849 across every patch site
+    // and the SLOT slack, so the same inline-hook geometry applies unchanged.
+    {"268850", 0x488c4c4, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x488c4d0, 0x168, 0x170},
+};
+
 ParseRevokeXML originalParseRevokeXML = nullptr;
 const RevokeHookConfig *activeRevokeHookConfig = nullptr;
+// Backing storage for the offsets used by hookedParseRevokeXML when the active hook
+// is an inline hook (the InlineRevokeHookConfig builds a compatible RevokeHookConfig).
+RevokeHookConfig activeInlineRevokeHookConfig = {nullptr, 0, 0, 0};
 std::mutex revokeTimeCacheMutex;
 std::unordered_map<std::string, std::string> revokeTimeCache;
 
@@ -398,6 +427,29 @@ bool looksLikeKnownRenderedTip(const std::string &tip) {
     return hasPrefix(tip, "已拦截") && tip.find("撤回") != std::string::npos;
 }
 
+// True when the recall was performed by the local user (you recalled your own
+// message). WeChat shows its own "You recalled a message" affordance for these, so
+// the anti-recall tip must not fire — there is nothing to "intercept". Matches the
+// self-recall wording WeChat emits across locales; works on either the rendered tip
+// text or the raw <replacemsg> CDATA from the revoke XML.
+bool tipIndicatesSelfRecall(const std::string &tip) {
+    if (tip.empty()) {
+        return false;
+    }
+    static const char *const selfMarkers[] = {
+        "You recalled ",  // English
+        "你撤回",          // Simplified Chinese
+        "你收回",          // Traditional Chinese variants
+        "你回收",
+    };
+    for (const char *marker : selfMarkers) {
+        if (tip.find(marker) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const std::vector<std::string> &revokeTipPlaceholders() {
     static const std::vector<std::string> placeholders = {
         "{from}",
@@ -569,6 +621,33 @@ std::string timeTextFromXML(const std::string *xml) {
     return "";
 }
 
+// The real newmsgid carried by the revoke XML. The static str-xzr patch forces
+// message+0x168 to 0 (to keep the original message); for the user's own recalls we
+// restore this real id so WeChat deletes the original natively. Returns false if the
+// XML carries no usable newmsgid.
+bool revokeNewMsgIdFromXML(const std::string *xml, uint64_t &result) {
+    if (xml == nullptr || xml->empty()) {
+        return false;
+    }
+
+    static const std::vector<std::string> idTags = {
+        "newmsgid",
+        "newMsgId",
+        "NewMsgId",
+        "newmsgId",
+    };
+
+    for (const auto &tag : idTags) {
+        uint64_t value = 0;
+        if (parseUnsignedInteger(xmlTagValue(*xml, tag), value) && value != 0) {
+            result = value;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 std::string revokeTimeCacheKey(uint64_t newMsgId, const std::string *xml, const std::string &originalTip) {
     if (newMsgId != 0) {
         return "id:" + std::to_string(newMsgId);
@@ -636,6 +715,11 @@ std::string renderRevokeTip(
     const std::string &timeText
 ) {
     if (configuredPhrase.empty()) {
+        return originalTip;
+    }
+
+    // Never rewrite the local user's own recalls — leave WeChat's native tip intact.
+    if (tipIndicatesSelfRecall(originalTip)) {
         return originalTip;
     }
 
@@ -972,9 +1056,26 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
     const uint64_t originalNewMsgId = *newMsgId;
     const std::string originalReplaceMsg = *replaceMsg;
 
+    // The local user's own recalls must look native (just WeChat's "You recalled a
+    // message" affordance). The static str-xzr patch unconditionally zeroed newMsgId,
+    // which keeps the original message and produces a duplicate line; restore the real
+    // newmsgid so WeChat deletes it normally, and leave the tip text untouched. Detect
+    // self-recalls from both the rendered tip and the raw <replacemsg> XML.
+    const bool selfRecall =
+        tipIndicatesSelfRecall(originalReplaceMsg) ||
+        tipIndicatesSelfRecall(xmlTagValue(*xml, "replacemsg"));
+
     @autoreleasepool {
         if (debugProbeEnabled()) {
             logRevokeProbe(msgType, originalNewMsgId, originalReplaceMsg, xml);
+        }
+
+        if (selfRecall) {
+            uint64_t realNewMsgId = 0;
+            if (revokeNewMsgIdFromXML(xml, realNewMsgId)) {
+                *newMsgId = realNewMsgId;
+            }
+            return result;
         }
 
         const char *phrase = [configuredPhrase() UTF8String];
@@ -1081,18 +1182,117 @@ bool writeHookSlot(void **slot, void *replacement) {
     return wroteReplacement;
 }
 
-void installRevokeTipHook() {
-    WeChatDylibImage image = {};
-    if (!findWeChatDylibImage(image)) {
-        return;
+// --- inline hook engine (for stub-less builds, e.g. 268849) -----------------
+
+// Encode the 3-instruction entry stub: adrp x16, SLOT ; ldr x16,[x16,#off] ; br x16.
+// Returns false if SLOT is unreachable by adrp + 64-bit unsigned-offset ldr.
+bool encodeEntryStub(uint64_t entryAddress, uint64_t slotAddress, uint32_t out[3]) {
+    const int64_t pageDelta =
+        static_cast<int64_t>(slotAddress & ~uint64_t(0xfff)) -
+        static_cast<int64_t>(entryAddress & ~uint64_t(0xfff));
+    if (pageDelta % 0x1000 != 0) {
+        return false;
+    }
+    const int64_t pages = pageDelta >> 12;
+    if (pages < -(int64_t(1) << 20) || pages >= (int64_t(1) << 20)) {
+        return false;
+    }
+    const uint32_t imm = static_cast<uint32_t>(pages) & 0x1fffff;
+    const uint32_t immlo = imm & 0x3;
+    const uint32_t immhi = (imm >> 2) & 0x7ffff;
+    out[0] = 0x90000000u | (immlo << 29) | (immhi << 5) | 16u;  // adrp x16
+
+    const uint64_t offset = slotAddress & 0xfff;
+    if (offset & 0x7) {
+        return false;  // 64-bit ldr unsigned immediate must be 8-byte aligned
+    }
+    out[1] = 0xf9400000u | (static_cast<uint32_t>(offset >> 3) << 10) | (16u << 5) | 16u;  // ldr x16,[x16,#off]
+    out[2] = 0xd61f0000u | (16u << 5);  // br x16
+    return true;
+}
+
+// Inverse of encodeEntryStub: returns the resolved SLOT address, or 0 if the three
+// instruction words are not a recognizable adrp x16 / ldr x16 / br x16 stub.
+uint64_t decodeEntryStubSlot(const uint32_t insns[3], uint64_t entryAddress) {
+    const uint32_t adrp = insns[0];
+    const uint32_t ldr = insns[1];
+    const uint32_t branch = insns[2];
+    if ((adrp & 0x9f00001f) != (0x90000000u | 16u)) {
+        return 0;
+    }
+    if ((ldr & 0xffc003ff) != (0xf9400000u | (16u << 5) | 16u)) {
+        return 0;
+    }
+    if (branch != (0xd61f0000u | (16u << 5))) {
+        return 0;
+    }
+    const uint32_t immlo = (adrp >> 29) & 0x3;
+    const uint32_t immhi = (adrp >> 5) & 0x7ffff;
+    const int64_t pages = signExtend((immhi << 2) | immlo, 21);
+    const uint64_t page = (entryAddress & ~uint64_t(0xfff)) + static_cast<uint64_t>(pages << 12);
+    const uint64_t offset = (static_cast<uint64_t>((ldr >> 10) & 0xfff)) << 3;
+    return page + offset;
+}
+
+// Map an executable copy of `byteCount` bytes from `bytes`. Prefers RW->mprotect(RX)
+// (works for non-hardened processes), falling back to MAP_JIT. Returns nullptr on
+// failure. `allocSize` receives the rounded page size for later munmap.
+void *allocExecutableBytes(const void *bytes, size_t byteCount, size_t &allocSize) {
+    const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    allocSize = (byteCount + pageSize - 1) & ~(pageSize - 1);
+
+    void *region = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (region != MAP_FAILED) {
+        std::memcpy(region, bytes, byteCount);
+        if (mprotect(region, allocSize, PROT_READ | PROT_EXEC) == 0) {
+            sys_icache_invalidate(region, byteCount);
+            return region;
+        }
+        munmap(region, allocSize);
     }
 
-    const std::string buildVersion = currentBundleBuildVersion();
-    const auto *config = revokeHookConfigForBuild(buildVersion.c_str());
-    if (config == nullptr) {
-        return;
+    region = mmap(nullptr, allocSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+                  MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+    if (region == MAP_FAILED) {
+        allocSize = 0;
+        return nullptr;
     }
+    pthread_jit_write_protect_np(0);
+    std::memcpy(region, bytes, byteCount);
+    pthread_jit_write_protect_np(1);
+    sys_icache_invalidate(region, byteCount);
+    return region;
+}
 
+// Build a trampoline that replays the saved prologue then jumps to continuationAddress.
+constexpr size_t inlineTrampolineByteCount = 6 * 4 + 8;  // 6 words + .quad
+
+void *buildInlineTrampoline(const uint32_t saved[inlineSavedInstructionCount], uint64_t continuationAddress, size_t &allocSize) {
+    uint8_t buffer[inlineTrampolineByteCount];
+    uint32_t *words = reinterpret_cast<uint32_t *>(buffer);
+    words[0] = saved[0];
+    words[1] = saved[1];
+    words[2] = saved[2];
+    words[3] = 0x58000000u | (3u << 5) | 17u;  // ldr x17, #12  (-> .quad at offset 24)
+    words[4] = 0xd61f0000u | (17u << 5);        // br  x17
+    words[5] = 0xd503201fu;                      // nop  (pad .quad to 8-byte alignment)
+    std::memcpy(buffer + 24, &continuationAddress, sizeof(continuationAddress));
+    return allocExecutableBytes(buffer, sizeof(buffer), allocSize);
+}
+
+const InlineRevokeHookConfig *inlineRevokeHookConfigForBuild(const char *buildVersion) {
+    if (buildVersion == nullptr) {
+        return nullptr;
+    }
+    for (const auto &config : inlineRevokeHookConfigs) {
+        if (std::strcmp(config.buildVersion, buildVersion) == 0) {
+            return &config;
+        }
+    }
+    return nullptr;
+}
+
+void installRevokeTipStubHook(const WeChatDylibImage &image, const RevokeHookConfig *config) {
     const uintptr_t originalBodyAddress = image.slide + config->originalBody;
     const uintptr_t hookSlotAddress = resolveParseRevokeXMLHookSlot(originalBodyAddress, image.start, image.size);
     if (hookSlotAddress == 0) {
@@ -1112,6 +1312,74 @@ void installRevokeTipHook() {
     if (!writeHookSlot(hookSlot, reinterpret_cast<void *>(&hookedParseRevokeXML))) {
         originalParseRevokeXML = nullptr;
         activeRevokeHookConfig = nullptr;
+    }
+}
+
+void installRevokeTipInlineHook(const WeChatDylibImage &image, const InlineRevokeHookConfig *config) {
+    const uintptr_t entryAddress = image.slide + config->entryOffset;
+    if (!rangeContains(image.start, image.size, entryAddress, 3 * sizeof(uint32_t)) ||
+        !isAddressRangeReadable(reinterpret_cast<const void *>(entryAddress), 3 * sizeof(uint32_t))) {
+        return;
+    }
+
+    // Self-locate the SLOT by decoding the static entry stub. If the static patch is
+    // absent (entry still holds the original prologue) we bail safely: WeChat keeps
+    // running the unmodified function, so the dylib degrades to a no-op.
+    uint32_t entryWords[3];
+    std::memcpy(entryWords, reinterpret_cast<const void *>(entryAddress), sizeof(entryWords));
+    const uint64_t slotAddress = decodeEntryStubSlot(entryWords, entryAddress);
+    if (slotAddress == 0) {
+        return;
+    }
+    if (!rangeContains(image.start, image.size, slotAddress, sizeof(void *)) ||
+        !isAddressRangeReadable(reinterpret_cast<const void *>(slotAddress), sizeof(void *))) {
+        return;
+    }
+
+    auto **slot = reinterpret_cast<void **>(slotAddress);
+    if (*slot == reinterpret_cast<void *>(&hookedParseRevokeXML)) {
+        return;  // already installed
+    }
+
+    size_t trampolineAllocSize = 0;
+    void *trampoline = buildInlineTrampoline(
+        config->savedInstructions,
+        image.slide + config->continuationOffset,
+        trampolineAllocSize
+    );
+    if (trampoline == nullptr) {
+        return;  // could not allocate executable memory; leave slot untouched
+    }
+
+    originalParseRevokeXML = reinterpret_cast<ParseRevokeXML>(trampoline);
+    activeInlineRevokeHookConfig = RevokeHookConfig{
+        config->buildVersion,
+        config->entryOffset,
+        config->newMsgIdOffset,
+        config->replaceMsgOffset,
+    };
+    activeRevokeHookConfig = &activeInlineRevokeHookConfig;
+
+    if (!writeHookSlot(slot, reinterpret_cast<void *>(&hookedParseRevokeXML))) {
+        originalParseRevokeXML = nullptr;
+        activeRevokeHookConfig = nullptr;
+        munmap(trampoline, trampolineAllocSize);
+    }
+}
+
+void installRevokeTipHook() {
+    WeChatDylibImage image = {};
+    if (!findWeChatDylibImage(image)) {
+        return;
+    }
+
+    const std::string buildVersion = currentBundleBuildVersion();
+    if (const auto *config = revokeHookConfigForBuild(buildVersion.c_str())) {
+        installRevokeTipStubHook(image, config);
+        return;
+    }
+    if (const auto *inlineConfig = inlineRevokeHookConfigForBuild(buildVersion.c_str())) {
+        installRevokeTipInlineHook(image, inlineConfig);
     }
 }
 
@@ -1183,6 +1451,15 @@ int wechat_antirecall_should_inspect_revoke_message_fields(const char *xml) {
     return shouldInspectRevokeMessageFields(&xmlString) ? 1 : 0;
 }
 
+uint64_t wechat_antirecall_revoke_newmsgid_from_xml(const char *xml) {
+    if (xml == nullptr) {
+        return 0;
+    }
+    const std::string xmlString = xml;
+    uint64_t value = 0;
+    return revokeNewMsgIdFromXML(&xmlString, value) ? value : 0;
+}
+
 uintptr_t wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
     uintptr_t originalBodyAddress,
     uintptr_t imageStart,
@@ -1193,6 +1470,95 @@ uintptr_t wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
 
 int wechat_antirecall_is_address_range_readable(uintptr_t address, uintptr_t length) {
     return isAddressRangeReadable(reinterpret_cast<const void *>(address), static_cast<size_t>(length)) ? 1 : 0;
+}
+
+int wechat_antirecall_encode_entry_stub(uint64_t entryAddr, uint64_t slotAddr, uint8_t out[12]) {
+    uint32_t words[3];
+    if (!encodeEntryStub(entryAddr, slotAddr, words)) {
+        return 0;
+    }
+    std::memcpy(out, words, sizeof(words));
+    return 1;
+}
+
+uint64_t wechat_antirecall_decode_entry_stub_slot(const uint8_t *entry, uint64_t entryAddr) {
+    if (entry == nullptr) {
+        return 0;
+    }
+    uint32_t words[3];
+    std::memcpy(words, entry, sizeof(words));
+    return decodeEntryStubSlot(words, entryAddr);
+}
+
+namespace {
+int (*selftestOriginalFunction)(void) = nullptr;
+int selftestHookedFunction(void) {
+    if (selftestOriginalFunction == nullptr) {
+        return -1;
+    }
+    return selftestOriginalFunction() + 0x100;
+}
+} // namespace
+
+int wechat_antirecall_inline_hook_selftest(void) {
+    const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+
+    // One 2-page allocation: page 0 becomes the executable fake target, page 1 stays
+    // writable and holds the slot. Adjacent pages guarantee the entry stub's adrp/ldr
+    // can reach the slot.
+    void *region = mmap(nullptr, 2 * pageSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (region == MAP_FAILED) {
+        return 0;
+    }
+    void *codeRegion = region;
+    void *slotRegion = static_cast<uint8_t *>(region) + pageSize;
+    const uint64_t entryAddress = reinterpret_cast<uint64_t>(codeRegion);
+    const uint64_t slotAddress = reinterpret_cast<uint64_t>(slotRegion);
+
+    uint32_t stub[3];
+    if (!encodeEntryStub(entryAddress, slotAddress, stub)) {
+        munmap(region, 2 * pageSize);
+        return 0;
+    }
+
+    // Fake target: the static entry stub (overwriting the prologue) followed by a body
+    // that returns 0x11, with an epilogue matching the saved prologue.
+    const uint32_t savedPrologue[inlineSavedInstructionCount] = {0xA9BC5FF8u, 0xA90157F6u, 0xA9024FF4u};
+    const uint32_t fakeWords[8] = {
+        stub[0], stub[1], stub[2],
+        0x52800220u,  // mov  w0, #0x11
+        0xA9424FF4u,  // ldp  x20, x19, [sp, #0x20]
+        0xA94157F6u,  // ldp  x22, x21, [sp, #0x10]
+        0xA8C45FF8u,  // ldp  x24, x23, [sp], #0x40
+        0xd65f03c0u,  // ret
+    };
+    std::memcpy(codeRegion, fakeWords, sizeof(fakeWords));
+    if (mprotect(codeRegion, pageSize, PROT_READ | PROT_EXEC) != 0) {
+        munmap(region, 2 * pageSize);
+        return 0;
+    }
+    sys_icache_invalidate(codeRegion, sizeof(fakeWords));
+
+    size_t trampolineAllocSize = 0;
+    void *trampoline = buildInlineTrampoline(savedPrologue, entryAddress + 12, trampolineAllocSize);
+    if (trampoline == nullptr) {
+        munmap(region, 2 * pageSize);
+        return 0;
+    }
+
+    selftestOriginalFunction = reinterpret_cast<int (*)(void)>(trampoline);
+    *reinterpret_cast<void **>(slotRegion) = reinterpret_cast<void *>(&selftestHookedFunction);
+
+    int (*fakeTarget)(void) = reinterpret_cast<int (*)(void)>(codeRegion);
+    const int result = fakeTarget();
+
+    selftestOriginalFunction = nullptr;
+    munmap(region, 2 * pageSize);
+    if (trampolineAllocSize > 0) {
+        munmap(trampoline, trampolineAllocSize);
+    }
+
+    return result == 0x111 ? 1 : 0;
 }
 
 __attribute__((constructor))

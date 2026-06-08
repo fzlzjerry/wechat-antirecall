@@ -726,6 +726,17 @@ struct CLI {
             selected.append(("update", updateTarget))
         }
 
+        if options.runtimeTip, let runtimeTipTarget = config.targets.first(where: { $0.identifier == "runtime-tip" }) {
+            // Inline-hook builds (e.g. 268849, whose parseRevokeXML has no WeChat
+            // dispatch stub) need a static entry rewrite that routes the function through
+            // the injected runtime dylib. This target is ONLY ever selected alongside the
+            // dylib (it is gated on options.runtimeTip and RuntimeTipInstaller runs first),
+            // never on its own — otherwise WeChat would jump through an unset slot and
+            // crash on the first revoke. Builds that hook via the native stub do not define
+            // this target, so they are unaffected.
+            selected.append(("runtime-tip", runtimeTipTarget))
+        }
+
         return selected
     }
 
@@ -893,6 +904,8 @@ private func displayName(forTargetIdentifier identifier: String) -> String {
         return "patch with recall tip"
     case "update":
         return "block automatic update"
+    case "runtime-tip":
+        return "route revoke parser through runtime hook (inline)"
     case "multiInstance":
         return "enable multi-instance"
     case "multiInstance-extra":
@@ -1331,7 +1344,7 @@ struct RuntimeTipInstaller {
     static let installName = "@loader_path/\(dylibFileName)"
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
-    static let supportedBuildVersions = ["268597", "268599", "268601", "268602", "268831"]
+    static let supportedBuildVersions = ["268597", "268599", "268601", "268602", "268831", "268849", "268850"]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL
