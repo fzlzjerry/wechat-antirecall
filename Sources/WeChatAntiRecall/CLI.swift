@@ -207,7 +207,12 @@ struct RecallTipPhrase: Equatable {
         try! RecallTipPhrase(defaultText)
     }
 
-    func rendered(senderName: String?, timestamp: Date = Date(), timeZone: TimeZone = .current) -> String {
+    func rendered(
+        senderName: String?,
+        messageContent: String? = nil,
+        timestamp: Date = Date(),
+        timeZone: TimeZone = .current
+    ) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = timeZone
@@ -216,6 +221,7 @@ struct RecallTipPhrase: Equatable {
         return text
             .replacingOccurrences(of: "{from}", with: senderName ?? "")
             .replacingOccurrences(of: "{time}", with: formatter.string(from: timestamp))
+            .replacingOccurrences(of: "{content}", with: messageContent ?? "")
     }
 }
 
@@ -242,12 +248,23 @@ enum RecallTipPhraseError: LocalizedError, Equatable {
 struct RecallTipPreview {
     static let fixedPrefix = "WeChat Anti-Recall"
 
+    // Message kinds whose recalled content is shown as raw text. Anything else (image,
+    // voice, …) is previewed as a "[type]" placeholder, mirroring the runtime's
+    // messageKindPlaceholder behavior.
+    static let textualMessageKinds: Set<String> = ["文本消息", "文本", "text", "Text"]
+
     let phrase: RecallTipPhrase
     let senderName: String?
     let messageKind: String
     let messageText: String
     let timestamp: Date
     let timeZone: TimeZone
+
+    // What {content} renders to in the preview: the raw text for text messages, a
+    // "[type]" placeholder for media.
+    var previewContent: String {
+        Self.textualMessageKinds.contains(messageKind) ? messageText : "[\(messageKind)]"
+    }
 
     func render() -> String {
         let formatter = DateFormatter()
@@ -256,7 +273,7 @@ struct RecallTipPreview {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
 
         return """
-        [\(Self.fixedPrefix)] \(phrase.rendered(senderName: senderName, timestamp: timestamp, timeZone: timeZone))
+        [\(Self.fixedPrefix)] \(phrase.rendered(senderName: senderName, messageContent: previewContent, timestamp: timestamp, timeZone: timeZone))
         [\(messageKind)]\(messageText)
         \(formatter.string(from: timestamp))
         """
@@ -1375,7 +1392,7 @@ struct RuntimeTipInstaller {
     static let installName = "@loader_path/\(dylibFileName)"
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
-    static let supportedBuildVersions = ["268597", "268599", "268601", "268602", "268831", "268849", "268850"]
+    static let supportedBuildVersions = ["268597", "268599", "268601", "268602", "268831", "268849", "268850", "268851"]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL

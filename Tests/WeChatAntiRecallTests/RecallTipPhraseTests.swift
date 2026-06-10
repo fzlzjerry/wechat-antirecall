@@ -35,6 +35,55 @@ final class RecallTipPhraseTests: XCTestCase {
         )
     }
 
+    func testPreviewSubstitutesContentWithTextForTextMessages() throws {
+        let phrase = try RecallTipPhrase("已拦截 {from} 撤回：{content}")
+        let timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let timestamp = calendar.date(from: DateComponents(
+            year: 2024, month: 1, day: 15, hour: 17, minute: 46, second: 44
+        ))!
+
+        let preview = RecallTipPreview(
+            phrase: phrase,
+            senderName: "张三",
+            messageKind: "文本消息",
+            messageText: "你好世界",
+            timestamp: timestamp,
+            timeZone: timeZone
+        ).render()
+
+        XCTAssertEqual(
+            preview,
+            """
+            [WeChat Anti-Recall] 已拦截 张三 撤回：你好世界
+            [文本消息]你好世界
+            2024-01-15 17:46:44
+            """
+        )
+    }
+
+    func testPreviewSubstitutesContentWithPlaceholderForMediaMessages() throws {
+        let phrase = try RecallTipPhrase("已拦截 {from} 撤回：{content}")
+        let timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let timestamp = calendar.date(from: DateComponents(
+            year: 2024, month: 1, day: 15, hour: 17, minute: 46, second: 44
+        ))!
+
+        let preview = RecallTipPreview(
+            phrase: phrase,
+            senderName: "张三",
+            messageKind: "图片",
+            messageText: "ignored.png",
+            timestamp: timestamp,
+            timeZone: timeZone
+        ).render()
+
+        XCTAssertTrue(preview.contains("已拦截 张三 撤回：[图片]"), preview)
+    }
+
     func testRejectsEmptyCustomPhrase() {
         XCTAssertThrowsError(try RecallTipPhrase("   ")) { error in
             XCTAssertEqual(error.localizedDescription, "撤回提示短语不能为空")

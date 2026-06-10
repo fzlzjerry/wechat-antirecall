@@ -316,6 +316,179 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(rendered, "已拦截 张三 撤回的一条消息")
     }
 
+    func testRendersConfiguredPhraseWithContentPlaceholder() throws {
+        let rendered = try renderEventWithContent(
+            original: "张三撤回了一条消息",
+            phrase: "已拦截 {from} 撤回：{content}",
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:30",
+            content: "你好世界"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 张三 撤回：你好世界")
+    }
+
+    func testStripsContentSeparatorWhenContentIsMissing() throws {
+        let rendered = try renderEventWithContent(
+            original: "张三撤回了一条消息",
+            phrase: "已拦截 {from} 撤回：{content}",
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:30",
+            content: ""
+        )
+
+        XCTAssertEqual(rendered, "已拦截 张三 撤回")
+    }
+
+    func testRendersMediaPlaceholderAsContent() throws {
+        let rendered = try renderEventWithContent(
+            original: "张三撤回了一条消息",
+            phrase: "已拦截 {from} 撤回：{content}",
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:30",
+            content: "[图片]"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 张三 撤回：[图片]")
+    }
+
+    func testRenderingWithTextContentIsIdempotent() throws {
+        let phrase = "已拦截 {from} 撤回：{content}"
+        let rendered = try renderEventWithContent(
+            original: "张三撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:30",
+            content: "你好世界"
+        )
+
+        // Re-running the hook on the already-rendered tip (WeChat may re-parse) must not
+        // nest or drop the content.
+        let again = try renderEventWithContent(
+            original: rendered,
+            phrase: phrase,
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:31",
+            content: "你好世界"
+        )
+
+        XCTAssertEqual(again, "已拦截 张三 撤回：你好世界")
+    }
+
+    func testEmptyContentRenderingIsIdempotent() throws {
+        let phrase = "已拦截 {from} 撤回：{content}"
+        let rendered = try renderEventWithContent(
+            original: "张三撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:30",
+            content: ""
+        )
+        XCTAssertEqual(rendered, "已拦截 张三 撤回")
+
+        let again = try renderEventWithContent(
+            original: rendered,
+            phrase: phrase,
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:31",
+            content: ""
+        )
+        XCTAssertEqual(again, "已拦截 张三 撤回")
+    }
+
+    func testContentContainingTimeMarkerSurvivesReRender() throws {
+        let phrase = "已拦截 {from} 于 {time} 撤回：{content}"
+        let rendered = try renderEventWithContent(
+            original: "张三撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "14:30",
+            content: "约 于 12:34 见"
+        )
+        XCTAssertEqual(rendered, "已拦截 张三 于 14:30 撤回：约 于 12:34 见")
+
+        // The duplicate-time-marker collapse must not touch the clock that lives inside
+        // the recalled content (it sits after 撤回, which bounds the collapse).
+        let again = try renderEventWithContent(
+            original: rendered,
+            phrase: phrase,
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "14:31",
+            content: "约 于 12:34 见"
+        )
+        XCTAssertEqual(again, "已拦截 张三 于 14:30 撤回：约 于 12:34 见")
+    }
+
+    func testSelfRecallLeavesNativeTipEvenWithContentTemplate() throws {
+        let rendered = try renderEventWithContent(
+            original: "你撤回了一条消息",
+            phrase: "已拦截 {from} 撤回：{content}",
+            newMsgId: 0,
+            xml: nil,
+            fallbackTime: "09:30",
+            content: "你好世界"
+        )
+
+        XCTAssertEqual(rendered, "你撤回了一条消息")
+    }
+
+    func testContentCacheRoundTripsByNewMsgId() throws {
+        wechat_antirecall_clear_revoke_content_cache()
+        defer { wechat_antirecall_clear_revoke_content_cache() }
+
+        wechat_antirecall_remember_revoke_content_for_test(9876543210123, "你好世界")
+
+        XCTAssertEqual(try lookupCachedContent(newMsgId: 9876543210123), "你好世界")
+        XCTAssertNil(wechat_antirecall_lookup_revoke_content_for_test(424242))
+    }
+
+    func testContentCacheIgnoresZeroIdAndEmptyPreview() throws {
+        wechat_antirecall_clear_revoke_content_cache()
+        defer { wechat_antirecall_clear_revoke_content_cache() }
+
+        wechat_antirecall_remember_revoke_content_for_test(0, "ignored")
+        wechat_antirecall_remember_revoke_content_for_test(7, "")
+
+        XCTAssertNil(wechat_antirecall_lookup_revoke_content_for_test(0))
+        XCTAssertNil(wechat_antirecall_lookup_revoke_content_for_test(7))
+    }
+
+    func testContentCacheClearEmptiesIt() throws {
+        wechat_antirecall_clear_revoke_content_cache()
+        wechat_antirecall_remember_revoke_content_for_test(42, "你好")
+        XCTAssertEqual(try lookupCachedContent(newMsgId: 42), "你好")
+
+        wechat_antirecall_clear_revoke_content_cache()
+        XCTAssertNil(wechat_antirecall_lookup_revoke_content_for_test(42))
+    }
+
+    func testReceivedMessagePreviewMapsTextAndMedia() throws {
+        XCTAssertEqual(try receivedPreview(msgType: 1, raw: "  你好世界  "), "你好世界")
+        XCTAssertEqual(try receivedPreview(msgType: 3, raw: ""), "[图片]")
+        XCTAssertEqual(try receivedPreview(msgType: 34, raw: "ignored"), "[语音]")
+        XCTAssertEqual(try receivedPreview(msgType: 43, raw: ""), "[视频]")
+        XCTAssertEqual(try receivedPreview(msgType: 49, raw: ""), "[链接]")
+        XCTAssertEqual(try receivedPreview(msgType: 99999, raw: ""), "[消息]")
+    }
+
+    func testReceivedTextPreviewTruncatesOnUTF8Boundary() throws {
+        let long = String(repeating: "中", count: 200)  // 600 UTF-8 bytes, over the 240 cap
+        let preview = try receivedPreview(msgType: 1, raw: long)
+
+        XCTAssertTrue(preview.hasSuffix("…"), preview)
+        XCTAssertLessThanOrEqual(preview.utf8.count, 240 + 3)  // cap + ellipsis bytes
+        XCTAssertFalse(preview.unicodeScalars.contains { $0.value == 0xFFFD })  // no split scalar
+    }
+
     private func render(original: String, phrase: String) throws -> String {
         let pointer = wechat_antirecall_render_revoke_tip_copy(original, phrase)
         let unwrapped = try XCTUnwrap(pointer)
@@ -341,6 +514,52 @@ final class RuntimeRewriteTests: XCTestCase {
             pointer = wechat_antirecall_render_revoke_tip_for_event_copy(original, phrase, newMsgId, nil, fallbackTime)
         }
 
+        let unwrapped = try XCTUnwrap(pointer)
+        defer {
+            wechat_antirecall_free(unwrapped)
+        }
+        return String(cString: unwrapped)
+    }
+
+    private func renderEventWithContent(
+        original: String,
+        phrase: String,
+        newMsgId: UInt64,
+        xml: String?,
+        fallbackTime: String,
+        content: String?
+    ) throws -> String {
+        func call(_ xmlPointer: UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>? {
+            if let content {
+                return content.withCString { contentPointer in
+                    wechat_antirecall_render_revoke_tip_for_event_with_content_copy(
+                        original, phrase, newMsgId, xmlPointer, fallbackTime, contentPointer
+                    )
+                }
+            }
+            return wechat_antirecall_render_revoke_tip_for_event_with_content_copy(
+                original, phrase, newMsgId, xmlPointer, fallbackTime, nil
+            )
+        }
+
+        let pointer = xml == nil ? call(nil) : xml!.withCString { call($0) }
+        let unwrapped = try XCTUnwrap(pointer)
+        defer {
+            wechat_antirecall_free(unwrapped)
+        }
+        return String(cString: unwrapped)
+    }
+
+    private func lookupCachedContent(newMsgId: UInt64) throws -> String {
+        let pointer = try XCTUnwrap(wechat_antirecall_lookup_revoke_content_for_test(newMsgId))
+        defer {
+            wechat_antirecall_free(pointer)
+        }
+        return String(cString: pointer)
+    }
+
+    private func receivedPreview(msgType: UInt32, raw: String) throws -> String {
+        let pointer = raw.withCString { wechat_antirecall_content_preview_for_received_message_copy(msgType, $0) }
         let unwrapped = try XCTUnwrap(pointer)
         defer {
             wechat_antirecall_free(unwrapped)

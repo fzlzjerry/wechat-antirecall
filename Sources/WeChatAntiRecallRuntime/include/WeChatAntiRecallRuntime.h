@@ -15,9 +15,36 @@ char *wechat_antirecall_render_revoke_tip_for_event_copy(
     const char *xml,
     const char *fallbackTime
 );
+
+// As above, but also substitutes {content} with the recalled message's preview (the
+// text captured for the message on the receive path, or a type placeholder like
+// "[图片]"). Pass NULL/empty for a cold-cache miss; {content} and a single leading
+// separator are then stripped so the tip never ends on a dangling "撤回：".
+char *wechat_antirecall_render_revoke_tip_for_event_with_content_copy(
+    const char *originalTip,
+    const char *configuredPhrase,
+    uint64_t newMsgId,
+    const char *xml,
+    const char *fallbackTime,
+    const char *contentPreview
+);
 char *wechat_antirecall_load_revoke_tip_phrase_for_home_copy(const char *homeDirectory);
 char *wechat_antirecall_load_revoke_tip_phrase_for_home_and_bundle_copy(const char *homeDirectory, const char *bundleIdentifier);
 void wechat_antirecall_clear_revoke_tip_time_cache(void);
+
+// Recalled-content cache (newmsgid -> preview). The receive-path hook fills it and the
+// revoke hook reads it to substitute {content}. Exposed for unit testing the join and
+// the preview mapping without a running WeChat.
+void wechat_antirecall_clear_revoke_content_cache(void);
+void wechat_antirecall_remember_revoke_content_for_test(uint64_t newMsgId, const char *preview);
+// Returns the cached preview for newMsgId (caller frees with wechat_antirecall_free), or
+// NULL if absent. Test-only window into the cache the receive hook fills.
+char *wechat_antirecall_lookup_revoke_content_for_test(uint64_t newMsgId);
+
+// Build the cached preview for a received message: trimmed/truncated text for the plain
+// -text type (1), or a localized type placeholder ("[图片]"/"[语音]"/…) for media. Caller
+// owns the returned buffer (free with wechat_antirecall_free).
+char *wechat_antirecall_content_preview_for_received_message_copy(uint32_t contentMsgType, const char *rawContent);
 int wechat_antirecall_is_target_wechat_dylib_path(const char *imagePath);
 uintptr_t wechat_antirecall_revoke_hook_original_body_for_build(const char *buildVersion);
 int wechat_antirecall_should_inspect_revoke_message_fields(const char *xml);

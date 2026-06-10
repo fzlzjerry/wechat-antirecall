@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
+#include <os/log.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,10 @@ namespace {
 
 constexpr NSUInteger revokeTipMaximumLength = 120;
 constexpr size_t revokeTimeCacheMaximumCount = 512;
+constexpr size_t revokeContentCacheMaximumCount = 512;
+// Recalled-content previews are truncated to this many UTF-8 bytes before being cached,
+// so a single recalled message can never blow past the 120-char tip budget on its own.
+constexpr size_t revokeContentPreviewMaximumBytes = 240;
 constexpr size_t arm64StubLength = 16;
 
 using ParseRevokeXML = bool (*)(void *, std::string *, void *, uint32_t);
@@ -62,6 +67,10 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // 268850 (WeChat 4.1.10 hotfix): byte-identical to 268849 across every patch site
     // and the SLOT slack, so the same inline-hook geometry applies unchanged.
     {"268850", 0x488c4c4, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x488c4d0, 0x168, 0x170},
+    // 268851 (WeChat 4.1.10 hotfix): verified byte-identical to 268850 at every patch
+    // site (entry prologue, str-xzr at 0x488cec8, all update sites) with the SLOT at
+    // 0x952bf00 still in __DATA zero-fill, so the same geometry applies unchanged.
+    {"268851", 0x488c4c4, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x488c4d0, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
@@ -71,6 +80,12 @@ const RevokeHookConfig *activeRevokeHookConfig = nullptr;
 RevokeHookConfig activeInlineRevokeHookConfig = {nullptr, 0, 0, 0};
 std::mutex revokeTimeCacheMutex;
 std::unordered_map<std::string, std::string> revokeTimeCache;
+// Maps a recalled message's newmsgid -> a short content preview captured when the
+// message first arrived (the receive-path hook fills this; see installRevokeTipHook).
+// The revoke hook reads it back to substitute {content} in the configured tip. Keyed by
+// "id:<newmsgid>", the same scheme revokeTimeCacheKey uses, so receive and revoke agree.
+std::mutex revokeContentCacheMutex;
+std::unordered_map<std::string, std::string> revokeContentCache;
 
 std::string trimCopy(const std::string &value) {
     const char *whitespace = " \t\r\n\"'";
@@ -454,6 +469,7 @@ const std::vector<std::string> &revokeTipPlaceholders() {
     static const std::vector<std::string> placeholders = {
         "{from}",
         "{time}",
+        "{content}",
     };
     return placeholders;
 }
@@ -685,6 +701,80 @@ std::string stableRevokeTimeText(
     return fallbackTime;
 }
 
+// Truncate `value` to at most `maxBytes` bytes without splitting a UTF-8 code point,
+// appending an ellipsis when anything was dropped. Continuation bytes are 0b10xxxxxx.
+std::string truncateUTF8Preview(const std::string &value, size_t maxBytes) {
+    if (value.size() <= maxBytes) {
+        return value;
+    }
+
+    size_t end = maxBytes;
+    while (end > 0 && (static_cast<unsigned char>(value[end]) & 0xc0) == 0x80) {
+        end -= 1;
+    }
+    return value.substr(0, end) + "\xE2\x80\xA6";  // U+2026 HORIZONTAL ELLIPSIS
+}
+
+// Localized type placeholder for a recalled message whose content cannot be shown as
+// plain text (image, voice, …). These strings are NOT present in wechat.dylib, so they
+// are hardcoded here. Returns an empty string for the plain-text type (1), whose raw
+// text is shown directly, and a generic "[消息]" for anything unrecognized.
+std::string messageKindPlaceholder(uint32_t contentMsgType) {
+    switch (contentMsgType) {
+        case 1:  return "";            // text — caller shows the raw text instead
+        case 3:  return "[图片]";
+        case 34: return "[语音]";
+        case 43: return "[视频]";
+        case 42: return "[名片]";
+        case 47: return "[动画表情]";
+        case 48: return "[位置]";
+        case 49: return "[链接]";       // appmsg: file/link/quote/etc. coarse bucket
+        case 50: return "[音视频通话]";
+        case 10000:
+        case 10002: return "[系统消息]";
+        default: return "[消息]";
+    }
+}
+
+// Build the cached preview for a freshly received message: trimmed/truncated text for
+// plain-text messages, a type placeholder for media. `rawContent` is ignored for media.
+std::string contentPreviewForReceivedMessage(uint32_t contentMsgType, const std::string &rawContent) {
+    if (contentMsgType == 1) {
+        return truncateUTF8Preview(trimCopy(rawContent), revokeContentPreviewMaximumBytes);
+    }
+    return messageKindPlaceholder(contentMsgType);
+}
+
+std::string revokeContentCacheKey(uint64_t newMsgId) {
+    return "id:" + std::to_string(newMsgId);
+}
+
+void rememberRevokeContentPreview(uint64_t newMsgId, const std::string &preview) {
+    if (newMsgId == 0 || preview.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(revokeContentCacheMutex);
+    if (revokeContentCache.size() >= revokeContentCacheMaximumCount) {
+        revokeContentCache.clear();
+    }
+    revokeContentCache[revokeContentCacheKey(newMsgId)] = preview;
+}
+
+bool lookupRevokeContentPreview(uint64_t newMsgId, std::string &out) {
+    if (newMsgId == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(revokeContentCacheMutex);
+    const auto found = revokeContentCache.find(revokeContentCacheKey(newMsgId));
+    if (found == revokeContentCache.end()) {
+        return false;
+    }
+    out = found->second;
+    return true;
+}
+
 void replaceTimePlaceholder(std::string &rendered, const std::string &timeText) {
     if (!timeText.empty()) {
         replaceAll(rendered, "{time}", timeText);
@@ -709,10 +799,38 @@ void replaceTimePlaceholder(std::string &rendered, const std::string &timeText) 
     replaceAll(rendered, "{time}", "");
 }
 
+// Substitute the recalled-message content. When no content was captured (cold cache,
+// media we chose not to preview, …) the placeholder and a single leading separator are
+// dropped so the tip does not end on a dangling "撤回：". Mirrors replaceTimePlaceholder.
+void replaceContentPlaceholder(std::string &rendered, const std::string &contentText) {
+    if (!contentText.empty()) {
+        replaceAll(rendered, "{content}", contentText);
+        return;
+    }
+
+    static const std::vector<std::string> emptyContentPatterns = {
+        "：{content}",
+        ": {content}",
+        ":{content}",
+        " {content}",
+    };
+
+    for (const auto &pattern : emptyContentPatterns) {
+        const auto position = rendered.find(pattern);
+        if (position != std::string::npos) {
+            rendered.erase(position, pattern.size());
+            break;
+        }
+    }
+
+    replaceAll(rendered, "{content}", "");
+}
+
 std::string renderRevokeTip(
     const std::string &originalTip,
     const std::string &configuredPhrase,
-    const std::string &timeText
+    const std::string &timeText,
+    const std::string &contentPreview
 ) {
     if (configuredPhrase.empty()) {
         return originalTip;
@@ -733,11 +851,20 @@ std::string renderRevokeTip(
     auto rendered = configuredPhrase;
     replaceAll(rendered, "{from}", extractSenderName(originalTip));
     replaceTimePlaceholder(rendered, timeText);
+    replaceContentPlaceholder(rendered, contentPreview);
     return rendered;
 }
 
+std::string renderRevokeTip(
+    const std::string &originalTip,
+    const std::string &configuredPhrase,
+    const std::string &timeText
+) {
+    return renderRevokeTip(originalTip, configuredPhrase, timeText, "");
+}
+
 std::string renderRevokeTip(const std::string &originalTip, const std::string &configuredPhrase) {
-    return renderRevokeTip(originalTip, configuredPhrase, currentTimeText());
+    return renderRevokeTip(originalTip, configuredPhrase, currentTimeText(), "");
 }
 
 NSString *revokeTipPreferenceKey() {
@@ -998,15 +1125,91 @@ NSString *nsStringFromStdString(const std::string &value) {
 
 void logRevokeProbe(uint32_t msgType, uint64_t newMsgId, const std::string &replaceMsg, const std::string *xml) {
     @autoreleasepool {
-        NSString *replacePreview = nsStringFromStdString(previewString(replaceMsg));
-        NSString *xmlPreview = xml == nullptr ? @"<nil>" : nsStringFromStdString(previewString(*xml));
-        NSLog(
-            @"[WeChatAntiRecall] revoke probe msgType=%u newmsgid=%llu replaceMsg=%@ xml=%@",
+        // The probe is opt-in (debugProbeEnabled) and exists precisely to show this data
+        // to whoever turned it on, so log it as public — NSLog/%@ would otherwise redact
+        // every dynamic field to <private> in unified logging.
+        const std::string replacePreview = previewString(replaceMsg);
+        const std::string xmlPreview = xml == nullptr ? "<nil>" : previewString(*xml);
+        os_log(
+            OS_LOG_DEFAULT,
+            "[WeChatAntiRecall] revoke probe msgType=%u newmsgid=%llu replaceMsg=%{public}s xml=%{public}s",
             msgType,
             newMsgId,
-            replacePreview,
-            xmlPreview
+            replacePreview.c_str(),
+            xmlPreview.c_str()
         );
+    }
+}
+
+std::string hexAsciiDump(const uint8_t *bytes, size_t length) {
+    static const char *const hexDigits = "0123456789abcdef";
+    std::string out;
+    std::string ascii;
+    out.reserve(length * 3 + length + 2);
+    for (size_t index = 0; index < length; index += 1) {
+        const uint8_t byte = bytes[index];
+        out.push_back(hexDigits[byte >> 4]);
+        out.push_back(hexDigits[byte & 0x0f]);
+        out.push_back(' ');
+        ascii.push_back((byte >= 0x20 && byte < 0x7f) ? static_cast<char>(byte) : '.');
+    }
+    out.push_back('|');
+    out.append(ascii);
+    return out;
+}
+
+// Dump the revoke message object so the recalled-content source can be located by hand.
+// The revoke XML carries no content, so the content must be joined from the receive path
+// (see the cache helpers); this probe is the investigation aid for finding the receive
+// object's field offsets. Off by default — gated by the same debug-probe switch as
+// logRevokeProbe — and every read is bounds-checked, so it never faults on partial maps.
+void logRevokeMessageStructProbe(const void *message, const RevokeHookConfig *config) {
+    if (message == nullptr) {
+        return;
+    }
+
+    @autoreleasepool {
+        if (config != nullptr) {
+            os_log(
+                OS_LOG_DEFAULT,
+                "[WeChatAntiRecall] struct probe known fields newMsgId=+0x%lx replaceMsg=+0x%lx",
+                static_cast<unsigned long>(config->newMsgIdOffset),
+                static_cast<unsigned long>(config->replaceMsgOffset)
+            );
+        }
+
+        const uint8_t *base = reinterpret_cast<const uint8_t *>(message);
+        constexpr size_t dumpStart = 0x140;
+        constexpr size_t dumpEnd = 0x300;
+
+        for (size_t offset = dumpStart; offset < dumpEnd; offset += 16) {
+            const uint8_t *row = base + offset;
+            if (!isAddressRangeReadable(row, 16)) {
+                continue;
+            }
+            os_log(OS_LOG_DEFAULT, "[WeChatAntiRecall] struct probe +0x%zx  %{public}s", offset, hexAsciiDump(row, 16).c_str());
+        }
+
+        // Any 8-byte slot holding a readable pointer might be a libc++ long-string data
+        // pointer or a nested object — preview the first bytes at the target so recalled
+        // text shows up in Console even when it is stored out of line.
+        for (size_t offset = dumpStart; offset < dumpEnd; offset += 8) {
+            const uint8_t *slot = base + offset;
+            if (!isAddressRangeReadable(slot, sizeof(void *))) {
+                continue;
+            }
+            const uint8_t *target = *reinterpret_cast<const uint8_t *const *>(slot);
+            if (target == nullptr || !isAddressRangeReadable(target, 48)) {
+                continue;
+            }
+            os_log(
+                OS_LOG_DEFAULT,
+                "[WeChatAntiRecall] struct probe +0x%zx -> %p  %{public}s",
+                offset,
+                reinterpret_cast<const void *>(target),
+                hexAsciiDump(target, 48).c_str()
+            );
+        }
     }
 }
 
@@ -1068,6 +1271,7 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
     @autoreleasepool {
         if (debugProbeEnabled()) {
             logRevokeProbe(msgType, originalNewMsgId, originalReplaceMsg, xml);
+            logRevokeMessageStructProbe(message, config);
         }
 
         if (selfRecall) {
@@ -1082,7 +1286,15 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
         if (phrase != nullptr) {
             *newMsgId = 0;
             const auto timeText = stableRevokeTimeText(originalNewMsgId, xml, originalReplaceMsg, currentTimeText());
-            replaceMsg->assign(renderRevokeTip(originalReplaceMsg, phrase, timeText));
+            // message+0x168 was already zeroed by the static str-xzr patch before this
+            // hook ran, so use the real newmsgid carried by the XML to join against the
+            // content captured on the receive path. Empty on a cold-cache miss → {content}
+            // strips cleanly.
+            uint64_t contentKey = 0;
+            revokeNewMsgIdFromXML(xml, contentKey);
+            std::string contentPreview;
+            lookupRevokeContentPreview(contentKey, contentPreview);
+            replaceMsg->assign(renderRevokeTip(originalReplaceMsg, phrase, timeText, contentPreview));
         }
     }
 
@@ -1400,12 +1612,31 @@ char *wechat_antirecall_render_revoke_tip_for_event_copy(
     const char *xml,
     const char *fallbackTime
 ) {
+    return wechat_antirecall_render_revoke_tip_for_event_with_content_copy(
+        originalTip,
+        configuredPhrase,
+        newMsgId,
+        xml,
+        fallbackTime,
+        nullptr
+    );
+}
+
+char *wechat_antirecall_render_revoke_tip_for_event_with_content_copy(
+    const char *originalTip,
+    const char *configuredPhrase,
+    uint64_t newMsgId,
+    const char *xml,
+    const char *fallbackTime,
+    const char *contentPreview
+) {
     const std::string original = originalTip == nullptr ? "" : originalTip;
     const std::string phrase = configuredPhrase == nullptr ? "" : configuredPhrase;
     const std::string xmlString = xml == nullptr ? "" : xml;
     const std::string fallback = fallbackTime == nullptr ? currentTimeText() : fallbackTime;
+    const std::string content = contentPreview == nullptr ? "" : contentPreview;
     const auto timeText = stableRevokeTimeText(newMsgId, xml == nullptr ? nullptr : &xmlString, original, fallback);
-    const auto rendered = renderRevokeTip(original, phrase, timeText);
+    const auto rendered = renderRevokeTip(original, phrase, timeText, content);
 
     return copyCString(rendered.c_str());
 }
@@ -1428,6 +1659,28 @@ char *wechat_antirecall_load_revoke_tip_phrase_for_home_and_bundle_copy(const ch
 void wechat_antirecall_clear_revoke_tip_time_cache(void) {
     std::lock_guard<std::mutex> lock(revokeTimeCacheMutex);
     revokeTimeCache.clear();
+}
+
+void wechat_antirecall_clear_revoke_content_cache(void) {
+    std::lock_guard<std::mutex> lock(revokeContentCacheMutex);
+    revokeContentCache.clear();
+}
+
+void wechat_antirecall_remember_revoke_content_for_test(uint64_t newMsgId, const char *preview) {
+    rememberRevokeContentPreview(newMsgId, preview == nullptr ? "" : preview);
+}
+
+char *wechat_antirecall_lookup_revoke_content_for_test(uint64_t newMsgId) {
+    std::string out;
+    if (!lookupRevokeContentPreview(newMsgId, out)) {
+        return nullptr;
+    }
+    return copyCString(out.c_str());
+}
+
+char *wechat_antirecall_content_preview_for_received_message_copy(uint32_t contentMsgType, const char *rawContent) {
+    const std::string raw = rawContent == nullptr ? "" : rawContent;
+    return copyCString(contentPreviewForReceivedMessage(contentMsgType, raw).c_str());
 }
 
 void wechat_antirecall_free(void *pointer) {
