@@ -71,6 +71,16 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // site (entry prologue, str-xzr at 0x488cec8, all update sites) with the SLOT at
     // 0x952bf00 still in __DATA zero-fill, so the same geometry applies unchanged.
     {"268851", 0x488c4c4, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x488c4d0, 0x168, 0x170},
+    // 269077 (WeChat 4.1.11): new marketing version. parseRevokeXML kept the same body
+    // (prologue stp x24,x23 / stp x22,x21 / stp x20,x19, then cbz w0 at entry+0x270 and
+    // str x0,[x19,#0x168] at entry+0xA04) but relocated to 0x48a4d68 — a unique geometry
+    // match across the whole arm64 slice. The static runtime-tip stub points at a fresh
+    // SLOT (0x93b3f00) in the __DATA tail slack (past __common, inside the segment's
+    // zero-fill); the runtime self-locates it by decoding the patched entry. Update
+    // blocking (patches.json "update" target) was located via XAppUpdateManager's ObjC
+    // selector->IMP table by method name (no 268849-class reference binary existed), and
+    // cross-checked against the 268831 binary.
+    {"269077", 0x48a4d68, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x48a4d74, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
