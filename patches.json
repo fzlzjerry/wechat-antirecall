@@ -653,6 +653,44 @@
     ]
   },
   {
+    "version": "268624",
+    "targets": [
+      {
+        "identifier": "revoke",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "47835b4",
+            "expected": "E00F0034",
+            "asm": "7F000014"
+          }
+        ]
+      },
+      {
+        "identifier": "revoke-tip",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          {
+            "arch": "arm64",
+            "addr": "47835b4",
+            "expected": [
+              "E00F0034",
+              "7F000014"
+            ],
+            "asm": "E00F0034"
+          },
+          {
+            "arch": "arm64",
+            "addr": "4783d48",
+            "expected": "60B600F9",
+            "asm": "7FB600F9"
+          }
+        ]
+      }
+    ]
+  },
+  {
     "version": "268831",
     "targets": [
       {

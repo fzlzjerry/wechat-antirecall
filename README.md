@@ -42,7 +42,7 @@ wechat.dylib.wechat-antirecall-backup-20260505-143000
 | 268596 | arm64 | 静默防撤回、提示模式、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268597 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
 | 268599, 268601, 268602 | arm64 | 静默防撤回、提示模式、自定义提示、屏蔽更新 | `Contents/Resources/wechat.dylib` |
-| 268831 | arm64 | 静默防撤回、提示模式、自定义提示 | `Contents/Resources/wechat.dylib` |
+| 268624, 268831 | arm64 | 静默防撤回、提示模式、自定义提示 | `Contents/Resources/wechat.dylib` |
 | 268849 | arm64 | 静默防撤回、提示模式、自定义提示(内联 hook)、屏蔽更新(未回归) | `Contents/Resources/wechat.dylib` |
 | 268850 | arm64 | 同 268849（+1 热修，补丁点逐字节一致） | `Contents/Resources/wechat.dylib` |
 | 268851 | arm64 | 同 268849/268850（再 +1 热修，补丁点逐字节一致） | `Contents/Resources/wechat.dylib` |
