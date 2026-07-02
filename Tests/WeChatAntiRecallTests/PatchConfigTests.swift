@@ -180,6 +180,73 @@ final class PatchConfigTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269077"))
     }
 
+    func testBuild269079SupportsInlineHookRecallPatchesAndUpdateBlock() throws {
+        // 269079 (WeChat 4.1.11 hotfix) is NOT byte-identical to 269077 — the whole slice was
+        // rebased, so every site shifted. parseRevokeXML kept its body (prologue + cbz w0 @
+        // entry+0x270 + str x0,[x19,#0x168] @ entry+0xA04) and relocated to 0x48a7c4c, a unique
+        // geometry match across the arm64 slice. Field offsets 0x168/0x170 were re-decoded from
+        // the actual instructions in this binary.
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "269079" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip", "update", "runtime-tip"])
+
+        let revoke = try XCTUnwrap(config.targets.first { $0.identifier == "revoke" })
+        XCTAssertEqual(revoke.binaryPath, "Contents/Resources/wechat.dylib")
+        XCTAssertEqual(revoke.entries.count, 1)
+        XCTAssertEqual(revoke.entries[0].arch, .arm64)
+        XCTAssertEqual(revoke.entries[0].address, 0x48a7ebc)
+        XCTAssertEqual(revoke.entries[0].expectedBytes, [try Data(hexString: "E00F0034")])
+        XCTAssertEqual(revoke.entries[0].patchBytes, try Data(hexString: "7F000014"))
+
+        let revokeTip = try XCTUnwrap(config.targets.first { $0.identifier == "revoke-tip" })
+        XCTAssertEqual(revokeTip.binaryPath, "Contents/Resources/wechat.dylib")
+        XCTAssertEqual(revokeTip.entries.count, 2)
+        XCTAssertEqual(revokeTip.entries[0].arch, .arm64)
+        XCTAssertEqual(revokeTip.entries[0].address, 0x48a7ebc)
+        XCTAssertEqual(revokeTip.entries[0].expectedBytes, [
+            try Data(hexString: "E00F0034"),
+            try Data(hexString: "7F000014")
+        ])
+        XCTAssertEqual(revokeTip.entries[0].patchBytes, try Data(hexString: "E00F0034"))
+        XCTAssertEqual(revokeTip.entries[1].arch, .arm64)
+        XCTAssertEqual(revokeTip.entries[1].address, 0x48a8650)
+        XCTAssertEqual(revokeTip.entries[1].expectedBytes, [try Data(hexString: "60B600F9")])
+        XCTAssertEqual(revokeTip.entries[1].patchBytes, try Data(hexString: "7FB600F9"))
+
+        // Update blocking: the 8 sites were located by resolving XAppUpdateManager's ObjC
+        // selectors -> IMPs (same selectors and prologues as 269077, accessor fields 0x18/0x19).
+        let update = try XCTUnwrap(config.targets.first { $0.identifier == "update" })
+        XCTAssertEqual(update.binaryPath, "Contents/Resources/wechat.dylib")
+        XCTAssertEqual(update.entries.count, 8)
+        XCTAssertTrue(update.entries.allSatisfy { $0.arch == .arm64 })
+        // Every update entry neutralizes a function: the patch ends in `ret` (C0035FD6).
+        XCTAssertTrue(update.entries.allSatisfy { $0.patchBytes.suffix(4) == (try! Data(hexString: "C0035FD6")) })
+        // startUpdater entry -> ret.
+        XCTAssertEqual(update.entries[0].address, 0x1d3304)
+        XCTAssertEqual(update.entries[0].expectedBytes, [try Data(hexString: "FC6FBBA9")])
+        XCTAssertEqual(update.entries[0].patchBytes, try Data(hexString: "C0035FD6"))
+        // checkForUpdates: entry -> ret.
+        XCTAssertEqual(update.entries[1].address, 0x1d543c)
+        XCTAssertEqual(update.entries[1].expectedBytes, [try Data(hexString: "FFC305D1")])
+        // canCheckForUpdate getter -> return 0.
+        XCTAssertEqual(update.entries[6].address, 0x1df9c4)
+        XCTAssertEqual(update.entries[6].expectedBytes, [try Data(hexString: "00644039C0035FD6")])
+        XCTAssertEqual(update.entries[6].patchBytes, try Data(hexString: "00008052C0035FD6"))
+
+        // Inline hook: static entry rewrite (adrp x16, SLOT ; ldr x16,[x16,#0xf00] ; br x16)
+        // routing parseRevokeXML through the injected dylib. The SLOT (0x93b7f00) lives in the
+        // __DATA tail slack past __common; the asm differs from 269077 only in the adrp page.
+        let runtimeTip = try XCTUnwrap(config.targets.first { $0.identifier == "runtime-tip" })
+        XCTAssertEqual(runtimeTip.binaryPath, "Contents/Resources/wechat.dylib")
+        XCTAssertEqual(runtimeTip.entries.count, 1)
+        XCTAssertEqual(runtimeTip.entries[0].address, 0x48a7c4c)
+        XCTAssertEqual(runtimeTip.entries[0].expectedBytes, [try Data(hexString: "F85FBCA9F65701A9F44F02A9")])
+        XCTAssertEqual(runtimeTip.entries[0].patchBytes, try Data(hexString: "90580290108247F900021FD6"))
+
+        XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269079"))
+    }
+
     private func loadPatchConfigs() throws -> [VersionConfig] {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("patches.json")

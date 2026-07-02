@@ -81,6 +81,17 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // selector->IMP table by method name (no 268849-class reference binary existed), and
     // cross-checked against the 268831 binary.
     {"269077", 0x48a4d68, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x48a4d74, 0x168, 0x170},
+    // 269079 (WeChat 4.1.11 hotfix): NOT byte-identical to 269077 — the whole slice was
+    // rebased, so every site shifted. parseRevokeXML kept the same body (identical prologue,
+    // cbz w0 at entry+0x270, str x0,[x19,#0x168] at entry+0xA04) and relocated to 0x48a7c4c,
+    // again a unique geometry match across the arm64 slice. Field offsets 0x168/0x170 were
+    // re-decoded from the actual str/ldr instructions in this binary (not copied). The
+    // runtime-tip stub points at a fresh SLOT (0x93b7f00) in the __DATA tail slack past
+    // __common; the runtime self-locates it by decoding the patched entry. Update blocking
+    // was re-derived from XAppUpdateManager's ObjC selector->IMP table by method name, and
+    // every site's entry bytes matched 269077's semantics (same prologues, accessor fields
+    // 0x18/0x19).
+    {"269079", 0x48a7c4c, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x48a7c58, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
