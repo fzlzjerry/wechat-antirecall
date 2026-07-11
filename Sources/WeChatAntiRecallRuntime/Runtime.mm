@@ -92,6 +92,22 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // every site's entry bytes matched 269077's semantics (same prologues, accessor fields
     // 0x18/0x19).
     {"269079", 0x48a7c4c, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x48a7c58, 0x168, 0x170},
+    // 269110 (WeChat 4.1.11 hotfix): NOT byte-identical to 269079 — the whole slice was
+    // rebased, so every site shifted. parseRevokeXML kept the same body (identical prologue,
+    // cbz w0 at entry+0x270, str x0,[x19,#0x168] at entry+0xA04) and relocated to 0x4509eb8,
+    // a unique geometry match across the arm64 slice (the ONLY prologue candidate whose
+    // entry+0x270 is the cbz w0 AND entry+0xA04 is the str). Field offsets 0x168/0x170 were
+    // re-decoded from the actual str/ldr instructions in this binary (str x0,[x19,#0x168] at
+    // entry+0xA04; ldr x0,[x19,#0x170] at entry+0x240/+0xa88). The runtime-tip stub points at a
+    // fresh SLOT (0x986bf00) in the __DATA tail slack — the page [0x986b000,0x986c000) sits past
+    // __bss (end 0x985a9f8) and __common (end 0x986a258), so it is entirely unused zero-fill;
+    // the runtime self-locates it by decoding the patched entry (adrp/ldr/br roundtrip verified).
+    // Update blocking was re-derived from XAppUpdateManager's ObjC selector->IMP table (91
+    // methods): the 4 trigger methods (startUpdater 0x264870, checkForUpdates: 0x2668e0,
+    // startBackgroundUpdatesCheck: 0x266b70, enableAutoUpdate: 0x266f5c) and the two
+    // automaticallyDownloadsUpdates/canCheckForUpdate accessor pairs (fields 0x18/0x19) all
+    // have entry bytes identical to 269077/269079.
+    {"269110", 0x4509eb8, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4509ec4, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;

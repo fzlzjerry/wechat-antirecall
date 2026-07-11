@@ -94,6 +94,7 @@
 | 268851 | `0x488c4c4` | `0x952bf00` | 4.1.10 热修，逐字节等同 268850 |
 | 269077 | `0x48a4d68` | `0x93b3f00` | 微信 4.1.11，几何特征在整个 arm64 切片里唯一命中 |
 | 269079 | `0x48a7c4c` | `0x93b7f00` | 微信 4.1.11 热修，**非**字节等同 269077（整片重定位），几何特征仍唯一命中 |
+| 269110 | `0x4509eb8` | `0x986bf00` | 微信 4.1.11 热修，**非**字节等同 269079（整片重定位），几何特征仍唯一命中 |
 
 ⚠️ **入口改写和 dylib 注入必须成对安装**：`--runtime-tip` 会一起完成二者，`RuntimeTipInstaller` 先跑注入。绝不要单独只打入口补丁——缺少 dylib 时 `SLOT` 不会被赋值，函数会跳空指针崩溃。`restore` 恢复 `wechat.dylib` 备份会同时撤销入口补丁、`SLOT` 和注入。
 
@@ -133,6 +134,7 @@
 - **268850 / 268851**：是 `268849` 的连续热修，全部 12 个补丁点 + `SLOT` 零填充槽位都逐字节一致（已对各自的 `wechat.dylib` 逐地址核对），配置直接复用 `268849`。
 - **269077**：`parseRevokeXML` 函数体不变（入口 `stp x24,x23` 等三条 + `entry+0x270` 的 `cbz w0` + `entry+0xA04` 的 `str x0,[x19,#0x168]`），整体重定位到 `0x48a4d68`；三处补丁点（`revoke` `0x48a4fd8`、`revoke-tip` `0x48a576c`、内联 hook 入口 `0x48a4d68`）原始字节都已逐地址核对。
 - **269079**：4.1.11 热修，**不是**字节等同 269077——整片重定位，所有站点都移位。`parseRevokeXML` 函数体不变（同一入口三条 `stp` + `entry+0x270` 的 `cbz w0` + `entry+0xA04` 的 `str x0,[x19,#0x168]`），整体重定位到 `0x48a7c4c`，几何特征在整个 arm64 切片里仍唯一命中。字段偏移 `0x168`/`0x170` 是**从本二进制里的 `str`/`ldr` 指令重新解码**得到的（非照抄）。防撤回三处补丁点（`revoke` `0x48a7ebc`、`revoke-tip` `0x48a8650`、内联 hook 入口 `0x48a7c4c`）原始字节逐地址核对；SLOT 取 `__common` 之后的 `__DATA` 尾部零填充 `0x93b7f00`，`adrp/ldr/br` 编码经 `decodeEntryStubSlot` 逻辑回环验证。屏蔽更新 8 处经 `XAppUpdateManager` selector→IMP 重新定位，各站点入口字节与 269077 语义一致（同前缀、访问器字段 `0x18`/`0x19`）。
+- **269110**：4.1.11 热修，**不是**字节等同 269079——整片重定位，所有站点都移位。`parseRevokeXML` 函数体不变（同一入口三条 `stp` + `entry+0x270` 的 `cbz w0` + `entry+0xA04` 的 `str x0,[x19,#0x168]`），整体重定位到 `0x4509eb8`；这是在整个 arm64 切片里**唯一**满足"入口 prologue `F85FBCA9F65701A9F44F02A9` 且 `+0x270` 是 `cbz w0`（`E00F0034`）且 `+0xA04` 是 `str x0,[x19,#0x168]`（`60B600F9`）"的候选（7445 个 prologue 命中中仅 1 个同时满足两处几何特征）。字段偏移 `0x168`/`0x170` 从本二进制指令重新解码（`str x0,[x19,#0x168]` 在 `+0xA04`；`ldr x0,[x19,#0x170]` 在 `+0x240`/`+0xa88`）。防撤回三处补丁点（`revoke` `0x450a128`、`revoke-tip` `0x450a8bc`、内联 hook 入口 `0x4509eb8`）原始字节逐地址核对。SLOT 取 `__DATA` 尾部零填充 `0x986bf00`——该页 `[0x986b000,0x986c000)` 位于 `__bss`（尾 `0x985a9f8`）与 `__common`（尾 `0x986a258`）之后，是整页未用零填充；`adrp/ldr/br` 编码（`109B02D0108247F900021FD6`）经 `decodeEntryStubSlot` 回环解析回 `0x986bf00`。屏蔽更新 8 处经 `XAppUpdateManager` selector→IMP 表（91 个方法）重新定位：4 个触发方法（`startUpdater` `0x264870`、`checkForUpdates:` `0x2668e0`、`startBackgroundUpdatesCheck:` `0x266b70`、`enableAutoUpdate:` `0x266f5c`）入口写 `ret`，两个访问器对 `automaticallyDownloadsUpdates`（字段 `0x18`，`0x2707c8`/`0x2707d0`）、`canCheckForUpdate`（字段 `0x19`，`0x2707d8`/`0x2707e0`）getter 改返回 0、setter 改 `ret`，各站点入口字节与 269077/269079 逐字节一致。
 
 ---
 
