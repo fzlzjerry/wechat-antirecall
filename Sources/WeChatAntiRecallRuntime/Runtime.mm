@@ -92,6 +92,10 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // every site's entry bytes matched 269077's semantics (same prologues, accessor fields
     // 0x18/0x19).
     {"269079", 0x48a7c4c, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x48a7c58, 0x168, 0x170},
+    // 269110 (WeChat 4.1.11): parseRevokeXML relocated to 0x4509eb8 while retaining
+    // the inline-hook geometry and 0x168/0x170 message field offsets. The entry stub
+    // targets zero-fill slack at 0x986bf00 near the end of __DATA.
+    {"269110", 0x4509eb8, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4509ec4, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
