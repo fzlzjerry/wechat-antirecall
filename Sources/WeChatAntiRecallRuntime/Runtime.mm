@@ -96,6 +96,12 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // the inline-hook geometry and 0x168/0x170 message field offsets. The entry stub
     // targets zero-fill slack at 0x986bf00 near the end of __DATA.
     {"269110", 0x4509eb8, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4509ec4, 0x168, 0x170},
+    // 269136 (WeChat 4.1.11 App Store): parseRevokeXML retained the same inline-hook
+    // geometry and field offsets, relocated to 0x48a0140. The static stub targets
+    // 0x93a3f00, zero-fill slack after __common and inside the __DATA segment.
+    // This App Store binary no longer contains XAppUpdateManager, so it intentionally
+    // has no update-blocking target in patches.json.
+    {"269136", 0x48a0140, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x48a014c, 0x168, 0x170},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
