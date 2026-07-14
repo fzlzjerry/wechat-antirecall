@@ -55,9 +55,17 @@ final class RuntimeRewriteTests: XCTestCase {
         let phrase = "已拦截 {from} 于 {time} 撤回的一条消息"
         let xml = "<sysmsg><revokemsg><createtime>1715563800</createtime></revokemsg></sysmsg>"
 
+        // The runtime formats the XML createtime as local HH:mm (formatUnixTimestamp uses the
+        // current time zone), so derive the expectation the same way instead of hardcoding a
+        // +08:00 value that fails under a UTC CI runner.
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm"
+        let expectedTime = formatter.string(from: Date(timeIntervalSince1970: 1715563800))
+
         XCTAssertEqual(
             try renderEvent(original: "Benjamin撤回了一条消息", phrase: phrase, newMsgId: 42, xml: xml, fallbackTime: "09:32"),
-            "已拦截 Benjamin 于 09:30 撤回的一条消息"
+            "已拦截 Benjamin 于 \(expectedTime) 撤回的一条消息"
         )
     }
 
