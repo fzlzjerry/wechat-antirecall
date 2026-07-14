@@ -7,7 +7,10 @@ on:
 
 jobs:
   build-test:
-    runs-on: macos-14   # Apple Silicon, native arm64
+    # macos-15 = Xcode 16 / Swift 6.x (Apple Silicon, native arm64). macos-14 ships Swift 5.10,
+    # whose older concurrency checker + clang reject the modern Swift/Objective-C++ this builds
+    # with locally; align CI to a current toolchain instead of contorting the source for 5.10.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
