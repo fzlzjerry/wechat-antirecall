@@ -20,6 +20,13 @@ let package = Package(
         .executableTarget(name: "WeChatAntiRecallGUI"),
         .target(
             name: "WeChatAntiRecallRuntime",
+            // Runtime.mm is Objective-C++ using constexpr/auto/using. Without an explicit
+            // standard SwiftPM emits no -std, so the toolchain's clang default decides: locally
+            // it accepts these as extensions, but the CI runner's clang rejects constexpr as a
+            // hard error. cxxLanguageStandard does NOT reach .mm files, so force it here.
+            cxxSettings: [
+                .unsafeFlags(["-std=gnu++17"])
+            ],
             linkerSettings: [
                 .linkedFramework("Foundation")
             ]
