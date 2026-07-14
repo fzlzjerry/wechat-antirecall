@@ -147,9 +147,12 @@ final class MachODylibInjectorTests: XCTestCase {
         let options = try InstallOptions(["--runtime-dylib", sourceDylibURL.path])
 
         XCTAssertThrowsError(try RuntimeTipInstaller(appInfo: appInfo, options: options)) { error in
+            // Derive the supported list from the source of truth so this never goes stale when a
+            // new build is added to supportedBuildVersions.
+            let supported = RuntimeTipInstaller.supportedBuildVersions.joined(separator: ", ")
             XCTAssertEqual(
                 error.localizedDescription,
-                "补丁配置无效：runtime-tip 目前只支持微信构建号 268597, 268599, 268601, 268602, 268831, 268849, 268850, 268851, 269077, 269079，当前构建号是 268596"
+                "补丁配置无效：runtime-tip 目前只支持微信构建号 \(supported)，当前构建号是 268596"
             )
         }
     }

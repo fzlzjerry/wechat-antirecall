@@ -1766,7 +1766,11 @@ func resign(appURL: URL, nestedBinaries: [URL]) throws {
 
     try runProcess("/usr/bin/codesign", ["--remove-sign", appURL.path])
     try runProcess("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appURL.path])
-    try runProcess("/usr/bin/xattr", ["-cr", appURL.path])
+    // Best-effort quarantine strip so the re-signed app still launches. The bundle is already
+    // validly signed above, so this must not fail the install: on macOS 15+ many files carry an
+    // OS-protected `com.apple.provenance` xattr that xattr(1) cannot remove even as the owner
+    // (EPERM), which previously aborted an otherwise-successful install.
+    _ = runProcessStatus("/usr/bin/xattr", ["-cr", appURL.path])
 }
 
 private func signMachO(at url: URL) throws {

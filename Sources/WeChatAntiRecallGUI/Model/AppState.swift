@@ -121,6 +121,43 @@ final class AppState: ObservableObject {
 
     // MARK: - Install
 
+    // MARK: - Install access
+
+    enum InstallAccess: Equatable {
+        case writableAsUser   // this app can patch WeChat directly (has disk access) — no password
+        case needsElevation   // WeChat.app owned by root/other — use osascript-admin
+        case blockedByTCC     // WeChat.app owned by us but not writable — grant Full Disk Access
+    }
+
+    /// Shown when App Management/TCC blocks this (ad-hoc) app from modifying a user-owned WeChat.app.
+    private func fullDiskAccessBanner() -> Banner {
+        Banner(
+            kind: .warning,
+            title: "需要「完全磁盘访问」",
+            message: "macOS 的「App 管理」阻止本 App 修改微信。请在「系统设置 → 隐私与安全性 → 完全磁盘访问」里把本 App 加进去并打开，然后「退出并重新打开本 App」再重试——新授权对已在运行的 App 不生效，必须重启本 App。（每次重新打补丁或微信升级后签名会变，可能需要在列表里重新添加。）",
+            settingsURL: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+            settingsButtonTitle: "打开完全磁盘访问设置")
+    }
+
+    /// Attempts an unprivileged write into WeChat.app to decide how to install. WeChat.app is
+    /// usually user-owned; a failed write there almost always means App Management/TCC is blocking
+    /// this (ad-hoc-signed) app rather than a genuine ownership problem — in which case elevating
+    /// wouldn't help (an osascript-admin child is blocked by the same TCC identity).
+    static func probeInstallAccess(appPath: String) -> InstallAccess {
+        let fm = FileManager.default
+        let resources = URL(fileURLWithPath: appPath).appendingPathComponent("Contents/Resources", isDirectory: true)
+        let probe = resources.appendingPathComponent(".wechat-antirecall-access-probe-\(UUID().uuidString)")
+        if (try? Data().write(to: probe, options: .withoutOverwriting)) != nil {
+            try? fm.removeItem(at: probe)
+            return .writableAsUser
+        }
+        if let uid = (try? fm.attributesOfItem(atPath: appPath))?[.ownerAccountID] as? NSNumber,
+           uid.uint32Value == getuid() {
+            return .blockedByTCC
+        }
+        return .needsElevation
+    }
+
     /// The one-click flow: verify WeChat is quit, dry-run to confirm every byte matches,
     /// then elevate for the real install. Any byte mismatch aborts before touching the app.
     func install(_ request: InstallRequest) async {
@@ -164,15 +201,34 @@ final class AppState: ObservableObject {
             }
         }
 
-        // 2) Real install (elevated, single password prompt).
-        busyMessage = "正在安装（需要管理员密码）…"
+        // 2) Real install. The real install emits progress; keep --json off the human log so
+        // codesign noise doesn't matter — we judge success by exit code.
         var realArgs = request.arguments(appPath: appPath, configURL: configURL, runtimeDylibURL: dylibURL, dryRun: false)
-        // The real install emits progress; keep --json off the human log so codesign noise
-        // doesn't matter — we judge success by exit code.
         realArgs.removeAll { $0 == "--json" }
-        let real = await CLIRunner.runAdmin(BundledPaths.cli, realArgs, operation: "install", onLine: { [weak self] line in
-            Task { @MainActor in self?.appendLog(line) }
-        })
+
+        // Pre-flight access probe (fixes "green dry-run → password prompt → 安装失败"). WeChat.app
+        // is usually owned by the current user, and the real blocker is App Management TCC, not
+        // Unix perms — so if this app has Full Disk Access we can patch directly with no password
+        // AND without the murky TCC attribution of an osascript-admin child. Only fall back to
+        // elevation when the bundle is genuinely owned by root.
+        let real: CLIResult
+        switch Self.probeInstallAccess(appPath: appPath) {
+        case .blockedByTCC:
+            banner = fullDiskAccessBanner()
+            appendLog("安装前检查失败：微信归当前用户但无写入权限（被 App 管理/TCC 拦截）。需授予完全磁盘访问。")
+            return
+        case .writableAsUser:
+            busyMessage = "正在安装…"
+            appendLog("安装前检查：可直接写入，无需管理员密码。")
+            real = await CLIRunner.runUser(BundledPaths.cli, realArgs, onLine: { [weak self] line in
+                Task { @MainActor in self?.appendLog(line) }
+            })
+        case .needsElevation:
+            busyMessage = "正在安装（需要管理员密码）…"
+            real = await CLIRunner.runAdmin(BundledPaths.cli, realArgs, operation: "install", onLine: { [weak self] line in
+                Task { @MainActor in self?.appendLog(line) }
+            })
+        }
 
         if real.cancelled {
             banner = Banner(kind: .info, title: "已取消", message: "你取消了管理员授权，未做任何修改。")
@@ -226,16 +282,29 @@ final class AppState: ObservableObject {
             banner = Banner(kind: .warning, title: "请先退出微信", message: "恢复前需要完全退出微信。")
             return
         }
+        let access = Self.probeInstallAccess(appPath: appPath)
+        if access == .blockedByTCC {
+            banner = fullDiskAccessBanner()
+            return
+        }
+
         busy = true
         defer { busy = false; busyMessage = "" }
-        busyMessage = "正在恢复（需要管理员密码）…"
+        busyMessage = access == .writableAsUser ? "正在恢复…" : "正在恢复（需要管理员密码）…"
 
         var failure: String?
         for entry in session.entries {
             let args = ["restore", "--app", appPath, "--binary", entry.binaryRelativePath, "--backup", entry.backupURL.path]
-            let result = await CLIRunner.runAdmin(BundledPaths.cli, args, operation: "restore", onLine: { [weak self] line in
-                Task { @MainActor in self?.appendLog(line) }
-            })
+            let result: CLIResult
+            if access == .writableAsUser {
+                result = await CLIRunner.runUser(BundledPaths.cli, args, onLine: { [weak self] line in
+                    Task { @MainActor in self?.appendLog(line) }
+                })
+            } else {
+                result = await CLIRunner.runAdmin(BundledPaths.cli, args, operation: "restore", onLine: { [weak self] line in
+                    Task { @MainActor in self?.appendLog(line) }
+                })
+            }
             if result.cancelled {
                 banner = Banner(kind: .info, title: "已取消", message: "你取消了管理员授权。")
                 return

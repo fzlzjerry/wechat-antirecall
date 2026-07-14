@@ -86,6 +86,9 @@ struct Banner: Identifiable, Equatable {
     let kind: BannerKind
     let title: String
     let message: String
+    /// Optional System Settings deep link; when set, the banner shows a one-click button.
+    var settingsURL: String? = nil
+    var settingsButtonTitle: String = "打开系统设置"
 
     static func == (lhs: Banner, rhs: Banner) -> Bool { lhs.id == rhs.id }
 }

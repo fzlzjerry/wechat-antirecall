@@ -185,7 +185,10 @@
 
 ## GUI 与发布
 
-- GUI 是 `Sources/WeChatAntiRecallGUI/` 的 SwiftUI 可执行目标，通过 `Process` / `osascript` 调用 **bundle 内**的预编译 `wechat-antirecall`，并显式传绝对 `--config` / `--runtime-dylib` / `--app`。`install`/`clone`/`restore` 走 `osascript … with administrator privileges`（root）；`tip-phrase` 走普通用户权限（绝不提权，否则写错 home 的容器 plist）。
+- GUI 是 `Sources/WeChatAntiRecallGUI/` 的 SwiftUI 可执行目标，通过 `Process` / `osascript` 调用 **bundle 内**的预编译 `wechat-antirecall`，并显式传绝对 `--config` / `--runtime-dylib` / `--app`；`tip-phrase` 走普通用户权限（绝不提权，否则写错 home 的容器 plist）。
+- **安装权限模型（重要）**：`/Applications/WeChat.app` 通常**归当前用户所有**，真正拦住修改的是 macOS 的 **App 管理 TCC**，不是 Unix 权限。**提权（osascript admin）并不能绕过它**——ad-hoc 签名的 App、以及它 `do shell script … with administrator privileges` 派生的 root 子进程，若"负责 App"没有 **App 管理 / 完全磁盘访问**授权，`access(W_OK)` 在 euid=0 下仍返回 EPERM。因此 `install`/`restore` 先用 `AppState.probeInstallAccess` 做一次**非提权写探针**（往 `Contents/Resources` 写个临时文件）分三类：`writableAsUser`（本 App 已有磁盘访问 → 直接以用户身份 `runUser` 安装，**无需密码**，也避开了 root 子进程 TCC 归属的坑）、`needsElevation`（bundle 归 root → 走 `runAdmin`）、`blockedByTCC`（bundle 归当前用户但写不了 → 弹「完全磁盘访问」引导横幅，**不再白弹密码**）。dry-run 故意**不**校验写权限（只校验字节），探针才是提权前的闸门。
+- **ad-hoc 授权是按构建的**：cdhash 每次重签都会变，用户每次重新打补丁 / 微信升级后可能要在「完全磁盘访问」列表里删旧的重新加。
+- **重签名与 `com.apple.provenance`**：`resign()` 在 codesign 成功**之后**才做的 `xattr -cr <app>` 是"尽力而为"（`runProcessStatus`，失败不致命）。macOS 15+ 很多文件带 OS 保护的 `com.apple.provenance` xattr，用户身份 `xattr -c` 都删不掉（EPERM）——它无害（bundle 此时已签好），以前却会把一个本已成功的安装报成失败。
 - 本地构建：`bash Scripts/make-app.sh`（默认 arm64；`ARCHS="arm64 x86_64"` 才做 universal，但 `Runtime.mm` 用了无 `#if __arm64__` 守卫的 arm64 专有 API，universal 可能硬编译失败——`ci.yml` 的 canary 就是验证这个）。
 - 发布：打 `v*` tag → `release.yml` 在 `macos-14` 构建 + `make-app.sh` + `hdiutil` 打 DMG + `gh release create`。默认 ad-hoc 签名（无付费证书），用户首次需右键→打开。有 Developer ID 时给 `make-app.sh` 传 `CODESIGN_ID` 并加公证步骤即可。
 - 更新地址烘焙在 `Sources/WeChatAntiRecallGUI/Services/UpdateService.swift` 的 `Upstream`（`fzlzjerry/wechat-antirecall`）。换仓库改这里。

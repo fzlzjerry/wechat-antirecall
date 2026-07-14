@@ -105,6 +105,7 @@ struct HintRow: View {
 
 struct BannerView: View {
     let banner: Banner
+    @Environment(\.openURL) private var openURL
 
     private var icon: String {
         switch banner.kind {
@@ -135,6 +136,13 @@ struct BannerView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if let settingsURL = banner.settingsURL, let url = URL(string: settingsURL) {
+                    Button(banner.settingsButtonTitle) { openURL(url) }
+                        .buttonStyle(.borderedProminent)
+                        .tint(color)
+                        .controlSize(.small)
+                        .padding(.top, 4)
+                }
             }
             Spacer(minLength: 0)
         }
