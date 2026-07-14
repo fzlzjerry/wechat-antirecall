@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: macos-14   # Apple Silicon, native arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Universal-compile canary (x86_64 Runtime.mm)
+        # Runtime.mm uses unguarded arm64-only APIs, so a universal build can hard-fail.
+        # This is the ONLY place x86_64 compilation is verified; release stays arm64-only
+        # unless this step is green. `continue-on-error` keeps CI green while surfacing the
+        # result — flip to a hard requirement once/if the dylib is made arch-portable.
+        continue-on-error: true
+        run: swift build -c release --arch arm64 --arch x86_64

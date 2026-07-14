@@ -163,4 +163,27 @@
 | `Sources/WeChatAntiRecall/Clone.swift` | `clone` 命令：复制 App、改写 Info.plist、独立 Bundle ID |
 | `Sources/WeChatAntiRecallRuntime/Runtime.mm` | 运行时 hook：`parseRevokeXML` 派发桩 / 内联挂载、提示渲染、时间 / 内容缓存、调试探针 |
 | `patches.json` | 每个构建号的字节补丁 |
-| `Tests/` | 补丁配置、Mach-O 注入、内联 hook 引擎、提示渲染、`clone` 的单元测试 |
+| `Sources/WeChatAntiRecall/JSONOutput.swift` | `--json` 的 `Encodable` DTO + 共享编码器（GUI 契约） |
+| `Sources/WeChatAntiRecallGUI/` | SwiftUI 图形界面（薄壳，shell-out 调用预编译 CLI） |
+| `Scripts/make-app.sh` / `make-icon.sh` | 组装 `.app` / 生成图标 |
+| `.github/workflows/{ci,release}.yml` | PR 构建测试 + universal canary / tag 发布 DMG |
+| `Tests/` | 补丁配置、Mach-O 注入、内联 hook 引擎、提示渲染、`clone`、`--json` 输出的单元测试 |
+
+---
+
+## `--json` 契约（GUI 依赖）
+
+`versions`、`install`、`clone` 支持 `--json`，输出机器可读 JSON（GUI 不解析本地化中文 stdout）。
+
+- **成功**：`versions` 输出 `VersionsReport`（`app` / `supported` / `runtimeTipSupported` / `installedBuildTargets` / `features` / `catalog`）；`install`/`clone` 在 `--dry-run` 下输出逐条补丁点状态。
+- **失败**：`main()` 检测到参数含 `--json` 时，把顶层错误输出为 `{"schemaVersion":1,"error":{kind,message,…}}` 到 **stdout**（仍 `exit 1`）；不带 `--json` 时保持原 stderr 行为。
+- 每个报告带 `schemaVersion`（当前 `1`），用于检测 CLI/GUI 版本不匹配。改动输出结构时**递增它**。
+- **权威事实**：自定义提示是否可用只看 `runtimeTipSupported`（源自编译期的 `supportedBuildVersions`），**不能**从 `patches.json` 里是否存在 `runtime-tip` 目标推断——见上文崩溃互锁。
+- DTO 定义在 `JSONOutput.swift`；不要给 `Decodable`-only 的领域类型（`PatchEntry` 等）加 `Encodable`。
+
+## GUI 与发布
+
+- GUI 是 `Sources/WeChatAntiRecallGUI/` 的 SwiftUI 可执行目标，通过 `Process` / `osascript` 调用 **bundle 内**的预编译 `wechat-antirecall`，并显式传绝对 `--config` / `--runtime-dylib` / `--app`。`install`/`clone`/`restore` 走 `osascript … with administrator privileges`（root）；`tip-phrase` 走普通用户权限（绝不提权，否则写错 home 的容器 plist）。
+- 本地构建：`bash Scripts/make-app.sh`（默认 arm64；`ARCHS="arm64 x86_64"` 才做 universal，但 `Runtime.mm` 用了无 `#if __arm64__` 守卫的 arm64 专有 API，universal 可能硬编译失败——`ci.yml` 的 canary 就是验证这个）。
+- 发布：打 `v*` tag → `release.yml` 在 `macos-14` 构建 + `make-app.sh` + `hdiutil` 打 DMG + `gh release create`。默认 ad-hoc 签名（无付费证书），用户首次需右键→打开。有 Developer ID 时给 `make-app.sh` 传 `CODESIGN_ID` 并加公证步骤即可。
+- 更新地址烘焙在 `Sources/WeChatAntiRecallGUI/Services/UpdateService.swift` 的 `Upstream`（`fzlzjerry/wechat-antirecall`）。换仓库改这里。

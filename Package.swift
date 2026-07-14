@@ -9,10 +9,15 @@ let package = Package(
     ],
     products: [
         .executable(name: "wechat-antirecall", targets: ["WeChatAntiRecall"]),
+        .executable(name: "WeChatAntiRecallGUI", targets: ["WeChatAntiRecallGUI"]),
         .library(name: "WeChatAntiRecallRuntime", type: .dynamic, targets: ["WeChatAntiRecallRuntime"])
     ],
     targets: [
         .executableTarget(name: "WeChatAntiRecall"),
+        // SwiftUI GUI shell. It shells out to the prebuilt `wechat-antirecall` CLI (bundled
+        // in the .app's Resources), so it has NO dependency on the CLI target. Packaged into
+        // a proper .app bundle by Scripts/make-app.sh.
+        .executableTarget(name: "WeChatAntiRecallGUI"),
         .target(
             name: "WeChatAntiRecallRuntime",
             linkerSettings: [
