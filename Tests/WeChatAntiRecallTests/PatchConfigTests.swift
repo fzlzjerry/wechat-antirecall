@@ -269,6 +269,32 @@ final class PatchConfigTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269110"))
     }
 
+    func testBuild269136SupportsInlineHookRecallPatches() throws {
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "269136" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip", "runtime-tip"])
+
+        let revoke = try XCTUnwrap(config.targets.first { $0.identifier == "revoke" })
+        XCTAssertEqual(revoke.binaryPath, "Contents/Resources/wechat.dylib")
+        XCTAssertEqual(revoke.entries[0].address, 0x48a03b0)
+        XCTAssertEqual(revoke.entries[0].expectedBytes, [try Data(hexString: "E00F0034")])
+        XCTAssertEqual(revoke.entries[0].patchBytes, try Data(hexString: "7F000014"))
+
+        let revokeTip = try XCTUnwrap(config.targets.first { $0.identifier == "revoke-tip" })
+        XCTAssertEqual(revokeTip.entries.map(\.address), [0x48a03b0, 0x48a0b44])
+        XCTAssertEqual(revokeTip.entries[1].expectedBytes, [try Data(hexString: "60B600F9")])
+        XCTAssertEqual(revokeTip.entries[1].patchBytes, try Data(hexString: "7FB600F9"))
+
+        let runtimeTip = try XCTUnwrap(config.targets.first { $0.identifier == "runtime-tip" })
+        XCTAssertEqual(runtimeTip.entries[0].address, 0x48a0140)
+        XCTAssertEqual(runtimeTip.entries[0].expectedBytes, [try Data(hexString: "F85FBCA9F65701A9F44F02A9")])
+        XCTAssertEqual(runtimeTip.entries[0].patchBytes, try Data(hexString: "105802F0108247F900021FD6"))
+
+        XCTAssertNil(config.targets.first { $0.identifier == "update" })
+        XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269136"))
+    }
+
     private func loadPatchConfigs() throws -> [VersionConfig] {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("patches.json")
