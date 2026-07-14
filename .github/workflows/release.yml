@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14   # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "short=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .app
+        env:
+          ARCHS: "arm64"           # cosmetic-only universal is opt-in; see ci.yml canary
+          APP_VERSION: ${{ steps.ver.outputs.short }}
+          APP_BUILD: ${{ github.run_number }}
+        run: |
+          chmod +x Scripts/make-app.sh
+          Scripts/make-app.sh
+
+      - name: Create DMG (system hdiutil, no third-party deps)
+        run: |
+          mkdir -p dist/dmg
+          cp -R dist/WeChatAntiRecall.app dist/dmg/
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create \
+            -volname "WeChatAntiRecall" \
+            -srcfolder dist/dmg \
+            -ov -format UDZO \
+            "dist/WeChatAntiRecall-${{ steps.ver.outputs.tag }}.dmg"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            dist/*.dmg \
+            --title "WeChatAntiRecall ${{ steps.ver.outputs.tag }}" \
+            --notes-file - <<'NOTES'
+          ## 安装
+
+          1. 下载并打开 DMG，把「微信防撤回」拖进「应用程序」。
+          2. **首次打开**：在「应用程序」里右键点它 → 打开（因为未做 Apple 付费公证，直接双击会被拦截）。
+          3. 按界面提示开启防撤回。安装时会弹一次管理员密码。
+
+          > 仅支持 Apple Silicon（M 系列）Mac。补丁只在已知微信构建号上生效；遇到新版微信，点「检查更新 → 拉取最新补丁数据」。
+          NOTES

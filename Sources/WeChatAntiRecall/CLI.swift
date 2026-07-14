@@ -476,10 +476,18 @@ struct RecallTipPreferenceStore {
 @main
 struct WeChatAntiRecall {
     static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
         do {
-            try CLI().run(arguments: Array(CommandLine.arguments.dropFirst()))
+            try CLI().run(arguments: arguments)
         } catch {
-            fputs("error: \(error.localizedDescription)\n", stderr)
+            // In --json mode, emit a structured error envelope to stdout (still exit 1) so
+            // the GUI has one machine-readable channel for both success and failure. Without
+            // --json, keep the original human stderr line for backward compatibility.
+            if arguments.contains("--json") {
+                JSONOutput.emit(ErrorEnvelope(error))
+            } else {
+                fputs("error: \(error.localizedDescription)\n", stderr)
+            }
             exit(1)
         }
     }
@@ -516,6 +524,17 @@ struct CLI {
         let appInfo = try readAppInfo(appPath: options.appPath)
         let specs = try WeChatCloneInstaller().install(appInfo: appInfo, options: options)
 
+        if options.json {
+            JSONOutput.emit(CloneReport(
+                schemaVersion: jsonSchemaVersion,
+                dryRun: options.dryRun,
+                app: AppInfoDTO(appInfo),
+                keepURLSchemes: options.keepURLSchemes,
+                clones: specs.map(CloneReport.CloneSpecDTO.init)
+            ))
+            return
+        }
+
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
         print(options.dryRun ? "Mode: dry-run (clone app bundle)" : "Mode: clone app bundle")
         print("Source: \(appInfo.appURL.path)")
@@ -536,6 +555,11 @@ struct CLI {
         let options = try CommonOptions(arguments)
         let configs = try loadConfigs(path: options.configPath)
         let appInfo = try readAppInfo(appPath: options.appPath)
+
+        if options.json {
+            JSONOutput.emit(VersionsReport(appInfo: appInfo, configs: configs))
+            return
+        }
 
         print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
         print("Bundle: \(appInfo.bundleIdentifier)")
@@ -578,44 +602,67 @@ struct CLI {
         var patchedBinaries: [URL] = []
         var backedUpBinaryPaths = Set<String>()
 
-        print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
-        if options.explicitWithTip && !options.runtimeTip {
-            let runtimeTipSupported = RuntimeTipInstaller.supportedBuildVersions.contains(appInfo.buildVersion)
-            fputs(withTipDeprecationNotice(buildVersion: appInfo.buildVersion, runtimeTipSupported: runtimeTipSupported) + "\n", stderr)
-        }
+        // JSON mode accumulators. In --json mode we suppress the human-readable prints and
+        // emit a single structured InstallReport at the exit point instead.
+        var jsonRuntimeReports: [InstallReport.RuntimeReportDTO] = []
+        var jsonTargetReports: [InstallReport.TargetReportDTO] = []
+
         var modeComponents = selectedTargets.map { displayName(forTargetIdentifier: $0.identifier) }
         if options.runtimeTip {
             modeComponents.append("custom recall tip phrase runtime")
         }
         let modeText = modeComponents.joined(separator: ", ")
-        print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
-        print("Checking whether WeChat is running...")
+
+        func emitInstallJSON(resigned: Bool) {
+            JSONOutput.emit(InstallReport(
+                schemaVersion: jsonSchemaVersion,
+                dryRun: options.dryRun,
+                resigned: resigned,
+                app: AppInfoDTO(appInfo),
+                mode: modeComponents,
+                runtime: jsonRuntimeReports,
+                targets: jsonTargetReports
+            ))
+        }
+
+        if !options.json {
+            print("WeChat: \(appInfo.shortVersion) (\(appInfo.buildVersion))")
+            if options.explicitWithTip && !options.runtimeTip {
+                let runtimeTipSupported = RuntimeTipInstaller.supportedBuildVersions.contains(appInfo.buildVersion)
+                fputs(withTipDeprecationNotice(buildVersion: appInfo.buildVersion, runtimeTipSupported: runtimeTipSupported) + "\n", stderr)
+            }
+            print(options.dryRun ? "Mode: dry-run (\(modeText))" : "Mode: \(modeText)")
+            print("Checking whether WeChat is running...")
+        }
         try ensureAppNotRunning(appInfo: appInfo, dryRun: options.dryRun)
-        print("Checking install permissions...")
+        if !options.json { print("Checking install permissions...") }
         try validateInstallPermissions(appInfo: appInfo, targets: targets, options: options, runtimeInstaller: runtimeInstaller)
 
         if let runtimeInstaller {
             if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(runtimeInstaller.hostBinaryURL.standardizedFileURL.path).inserted {
-                print("Creating backup for \(RuntimeTipInstaller.hostBinaryPath)...")
+                if !options.json { print("Creating backup for \(RuntimeTipInstaller.hostBinaryPath)...") }
                 let backupURL = try makeBackup(of: runtimeInstaller.hostBinaryURL)
-                print("Backup: \(backupURL.path)")
+                if !options.json { print("Backup: \(backupURL.path)") }
             }
 
-            print(options.dryRun ? "Checking runtime tip injection..." : "Installing runtime tip support...")
+            if !options.json { print(options.dryRun ? "Checking runtime tip injection..." : "Installing runtime tip support...") }
             let reports = try runtimeInstaller.install(dryRun: options.dryRun)
-            print("Runtime dylib: \(runtimeInstaller.sourceDylibURL.path) -> \(runtimeInstaller.destinationDylibRelativePath)")
-            print("Runtime loader target: \(RuntimeTipInstaller.hostBinaryPath)")
-            for report in reports {
-                let statusText: String
-                switch report.status {
-                case .injected:
-                    statusText = "injected"
-                case .wouldInject:
-                    statusText = "would inject"
-                case .alreadyInjected:
-                    statusText = "already injected"
+            jsonRuntimeReports = reports.map(InstallReport.RuntimeReportDTO.init)
+            if !options.json {
+                print("Runtime dylib: \(runtimeInstaller.sourceDylibURL.path) -> \(runtimeInstaller.destinationDylibRelativePath)")
+                print("Runtime loader target: \(RuntimeTipInstaller.hostBinaryPath)")
+                for report in reports {
+                    let statusText: String
+                    switch report.status {
+                    case .injected:
+                        statusText = "injected"
+                    case .wouldInject:
+                        statusText = "would inject"
+                    case .alreadyInjected:
+                        statusText = "already injected"
+                    }
+                    print("  - \(report.arch.rawValue) \(report.installName) at file+0x\(String(report.commandOffset, radix: 16)) (\(statusText), padding left: \(report.paddingLeft))")
                 }
-                print("  - \(report.arch.rawValue) \(report.installName) at file+0x\(String(report.commandOffset, radix: 16)) (\(statusText), padding left: \(report.paddingLeft))")
             }
 
             if !options.dryRun {
@@ -632,37 +679,54 @@ struct CLI {
             patchedBinaries.append(binaryURL)
 
             if !options.dryRun && !options.noBackup && backedUpBinaryPaths.insert(binaryURL.standardizedFileURL.path).inserted {
-                print("Creating backup for \(target.binaryPath)...")
+                if !options.json { print("Creating backup for \(target.binaryPath)...") }
                 let backupURL = try makeBackup(of: binaryURL)
-                print("Backup: \(backupURL.path)")
+                if !options.json { print("Backup: \(backupURL.path)") }
             }
 
             let reports = try MachOPatcher(fileURL: binaryURL).patch(entries: target.entries, dryRun: options.dryRun)
-            print("Patched target: \(target.binaryPath)")
-            for report in reports {
-                let statusText: String
-                switch report.status {
-                case .patched:
-                    statusText = "patched"
-                case .wouldPatch:
-                    statusText = "would patch"
-                case .alreadyPatched:
-                    statusText = "already patched"
+            jsonTargetReports.append(InstallReport.TargetReportDTO(
+                identifier: target.identifier,
+                binary: target.binaryPath,
+                entries: reports.map(InstallReport.EntryReportDTO.init)
+            ))
+            if !options.json {
+                print("Patched target: \(target.binaryPath)")
+                for report in reports {
+                    let statusText: String
+                    switch report.status {
+                    case .patched:
+                        statusText = "patched"
+                    case .wouldPatch:
+                        statusText = "would patch"
+                    case .alreadyPatched:
+                        statusText = "already patched"
+                    }
+                    print("  - \(report.arch.rawValue) 0x\(String(report.address, radix: 16)) -> file+0x\(String(report.fileOffset, radix: 16)) (\(statusText))")
                 }
-                print("  - \(report.arch.rawValue) 0x\(String(report.address, radix: 16)) -> file+0x\(String(report.fileOffset, radix: 16)) (\(statusText))")
             }
         }
 
         if options.dryRun {
-            print("Dry-run complete. No files were changed.")
+            if options.json {
+                emitInstallJSON(resigned: false)
+            } else {
+                print("Dry-run complete. No files were changed.")
+            }
             return
         }
 
+        var resigned = false
         if options.skipResign {
-            print("Skipped code signing.")
+            if !options.json { print("Skipped code signing.") }
         } else {
             try resign(appURL: appInfo.appURL, nestedBinaries: patchedBinaries)
-            print("Code signing complete.")
+            resigned = true
+            if !options.json { print("Code signing complete.") }
+        }
+
+        if options.json {
+            emitInstallJSON(resigned: resigned)
         }
     }
 
@@ -790,9 +854,9 @@ struct CLI {
         wechat-antirecall
 
         Usage:
-          wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json]
-          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip (deprecated, prefer --runtime-tip)] [--runtime-tip] [--runtime-dylib <path>] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign]
-          wechat-antirecall clone    [--app /Applications/WeChat.app] [--output-dir /Applications] [--count 2] [--name-prefix WeChat] [--keep-url-schemes] [--replace] [--dry-run] [--skip-resign]
+          wechat-antirecall versions [--app /Applications/WeChat.app] [--config patches.json] [--json]
+          wechat-antirecall install  [--app /Applications/WeChat.app] [--config patches.json] [--with-tip (deprecated, prefer --runtime-tip)] [--runtime-tip] [--runtime-dylib <path>] [--multi-instance] [--block-update] [--update-only] [--dry-run] [--no-backup] [--skip-resign] [--json]
+          wechat-antirecall clone    [--app /Applications/WeChat.app] [--output-dir /Applications] [--count 2] [--name-prefix WeChat] [--keep-url-schemes] [--replace] [--dry-run] [--skip-resign] [--json]
           wechat-antirecall restore  --backup <path> [--binary Contents/MacOS/WeChat] [--app /Applications/WeChat.app] [--skip-resign]
           wechat-antirecall tip-phrase get
           wechat-antirecall tip-phrase set <phrase>
@@ -807,6 +871,8 @@ struct CLI {
           is a pure byte patch with no runtime hook, so it cannot handle your own recalls
           (they leave a duplicate tip line); --runtime-tip addresses this via its hook.
           --with-tip still works as a fallback.
+          --json emits machine-readable output (used by the GUI); on error it prints a JSON
+          envelope to stdout and still exits non-zero.
         """)
     }
 }
@@ -827,6 +893,7 @@ private func printPreview(phrase: RecallTipPhrase, senderName: String?, messageK
 struct CommonOptions {
     var appPath = defaultAppPath
     var configPath: String?
+    var json = false
 
     init(_ arguments: [String]) throws {
         var parser = ArgumentCursor(arguments)
@@ -836,6 +903,8 @@ struct CommonOptions {
                 appPath = try parser.requiredValue(after: argument)
             case "--config":
                 configPath = try parser.requiredValue(after: argument)
+            case "--json":
+                json = true
             default:
                 throw ToolError.usage("未知参数：\(argument)")
             }
@@ -859,6 +928,7 @@ struct InstallOptions {
     var skipResign = false
     var runtimeTip = false
     var runtimeDylibPath: String?
+    var json = false
 
     var targetIdentifiers: [String] {
         if updateOnly {
@@ -909,6 +979,8 @@ struct InstallOptions {
                 noBackup = true
             case "--skip-resign":
                 skipResign = true
+            case "--json":
+                json = true
             default:
                 throw ToolError.usage("未知参数：\(argument)")
             }

@@ -9,6 +9,7 @@ struct CloneOptions {
     var replace = false
     var keepURLSchemes = false
     var skipResign = false
+    var json = false
 
     init(_ arguments: [String]) throws {
         var parser = ArgumentCursor(arguments)
@@ -38,6 +39,8 @@ struct CloneOptions {
                 keepURLSchemes = true
             case "--skip-resign":
                 skipResign = true
+            case "--json":
+                json = true
             default:
                 throw ToolError.usage("未知参数：\(argument)")
             }
