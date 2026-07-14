@@ -196,22 +196,32 @@ bool isAddressRangeReadable(const void *address, size_t length) {
     }
 
     while (current < end) {
+        // Descend into submaps to read the LEAF mapping's real protection. The dyld shared
+        // cache nests unreadable (`---`) guard pages inside a readable top-level region, so
+        // plain mach_vm_region reports the wrapper as readable — a bare pointer chase into
+        // such a hole then passes this check and faults on access (the crash this fixes).
+        // mach_vm_region_recurse returns the actual leaf mapping's protection.
         mach_vm_address_t regionAddress = current;
         mach_vm_size_t regionSize = 0;
-        vm_region_basic_info_data_64_t info = {};
-        mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t objectName = MACH_PORT_NULL;
-        const kern_return_t result = mach_vm_region(
-            mach_task_self(),
-            &regionAddress,
-            &regionSize,
-            VM_REGION_BASIC_INFO_64,
-            reinterpret_cast<vm_region_info_t>(&info),
-            &infoCount,
-            &objectName
-        );
-        if (objectName != MACH_PORT_NULL) {
-            mach_port_deallocate(mach_task_self(), objectName);
+        vm_region_submap_info_data_64_t info = {};
+        natural_t depth = 0;
+        kern_return_t result = KERN_SUCCESS;
+        for (;;) {
+            regionAddress = current;
+            regionSize = 0;
+            mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
+            result = mach_vm_region_recurse(
+                mach_task_self(),
+                &regionAddress,
+                &regionSize,
+                &depth,
+                reinterpret_cast<vm_region_recurse_info_t>(&info),
+                &infoCount
+            );
+            if (result != KERN_SUCCESS || !info.is_submap) {
+                break;
+            }
+            depth += 1;
         }
         if (result != KERN_SUCCESS || regionAddress > current || regionSize == 0) {
             return false;
