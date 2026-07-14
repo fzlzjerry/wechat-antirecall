@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14   # Apple Silicon
+    runs-on: macos-15   # Apple Silicon, Xcode 16 / Swift 6.x (macos-14's Swift 5.10 can't build the source; see ci.yml)
     steps:
       - uses: actions/checkout@v4
 
