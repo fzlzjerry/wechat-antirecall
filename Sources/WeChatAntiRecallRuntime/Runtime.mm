@@ -96,6 +96,22 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // the inline-hook geometry and 0x168/0x170 message field offsets. The entry stub
     // targets zero-fill slack at 0x986bf00 near the end of __DATA.
     {"269110", 0x4509eb8, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4509ec4, 0x168, 0x170},
+    // 269332 (WeChat 4.1.12): new marketing version. parseRevokeXML was RECOMPILED, so the
+    // old geometry (cbz w0 at entry+0x270, str at entry+0xA04) no longer holds verbatim and
+    // the whole slice rebased — it was relocated by diffing the identical function against a
+    // 269111 (4.1.11) reference binary (masked-instruction shape match, ratio 0.76 vs 0.17 for
+    // the runner-up; entry prologue still stp x24,x23 / stp x22,x21 / stp x20,x19). The cbz w0
+    // guard stayed at entry+0x270 (0x462f690), but a compiler-inserted call after it pushed the
+    // newmsgid store down to entry+0xA10 (0x462fe30). CRITICAL: the message-struct layout moved
+    // — newMsgId is now at 0x198 and replaceMsg (std::string) at 0x1A0 (was 0x168/0x170 on every
+    // prior build). Both offsets were re-decoded from THIS binary's str/ldr instructions: the
+    // newmsgid str is str x0,[x19,#0x198], and the four replaceMsg ldr x0,[x19,#0x1A0] sites map
+    // 1:1 onto the reference's four ldr x0,[x19,#0x170] sites. The runtime-tip stub targets fresh
+    // zero-fill slack at 0x9a53f00 (between __common end 0x9a53718 and __DATA end 0x9a54000); the
+    // runtime self-locates it by decoding the patched entry. Update blocking was re-resolved via
+    // XAppUpdateManager's ObjC selector->IMP table (all 8 sites byte-identical to the reference,
+    // only relocated).
+    {"269332", 0x462f420, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462f42c, 0x198, 0x1a0},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;

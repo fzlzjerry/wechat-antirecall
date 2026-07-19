@@ -95,6 +95,7 @@
 | 269077 | `0x48a4d68` | `0x93b3f00` | 微信 4.1.11，几何特征在整个 arm64 切片里唯一命中 |
 | 269079 | `0x48a7c4c` | `0x93b7f00` | 微信 4.1.11 热修，**非**字节等同 269077（整片重定位），几何特征仍唯一命中 |
 | 269110 | `0x4509eb8` | `0x986bf00` | 微信 4.1.11，补丁点和 SLOT 均从本构建重新定位 |
+| 269332 | `0x462f420` | `0x9a53f00` | 微信 4.1.12，`parseRevokeXML` 被重编译（详见下方核对记录），字段偏移改为 `0x198`/`0x1A0` |
 
 ⚠️ **入口改写和 dylib 注入必须成对安装**：`--runtime-tip` 会一起完成二者，`RuntimeTipInstaller` 先跑注入。绝不要单独只打入口补丁——缺少 dylib 时 `SLOT` 不会被赋值，函数会跳空指针崩溃。`restore` 恢复 `wechat.dylib` 备份会同时撤销入口补丁、`SLOT` 和注入。
 
@@ -135,6 +136,7 @@
 - **269077**：`parseRevokeXML` 函数体不变（入口 `stp x24,x23` 等三条 + `entry+0x270` 的 `cbz w0` + `entry+0xA04` 的 `str x0,[x19,#0x168]`），整体重定位到 `0x48a4d68`；三处补丁点（`revoke` `0x48a4fd8`、`revoke-tip` `0x48a576c`、内联 hook 入口 `0x48a4d68`）原始字节都已逐地址核对。
 - **269079**：4.1.11 热修，**不是**字节等同 269077——整片重定位，所有站点都移位。`parseRevokeXML` 函数体不变（同一入口三条 `stp` + `entry+0x270` 的 `cbz w0` + `entry+0xA04` 的 `str x0,[x19,#0x168]`），整体重定位到 `0x48a7c4c`，几何特征在整个 arm64 切片里仍唯一命中。字段偏移 `0x168`/`0x170` 是**从本二进制里的 `str`/`ldr` 指令重新解码**得到的（非照抄）。防撤回三处补丁点（`revoke` `0x48a7ebc`、`revoke-tip` `0x48a8650`、内联 hook 入口 `0x48a7c4c`）原始字节逐地址核对；SLOT 取 `__common` 之后的 `__DATA` 尾部零填充 `0x93b7f00`，`adrp/ldr/br` 编码经 `decodeEntryStubSlot` 逻辑回环验证。屏蔽更新 8 处经 `XAppUpdateManager` selector→IMP 重新定位，各站点入口字节与 269077 语义一致（同前缀、访问器字段 `0x18`/`0x19`）。
 - **269110**：4.1.11 构建，`parseRevokeXML` 几何特征在 arm64 切片中唯一命中，入口为 `0x4509eb8`，`revoke` 为 `0x450a128`，`revoke-tip` 字段写入为 `0x450a8bc`。SLOT `0x986bf00` 位于 `__common` 结束地址 `0x986a258` 与 `__DATA` 结束地址 `0x986c000` 之间的零填充，入口桩回环解码到同一地址。屏蔽更新的 8 个地址通过本构建的 `XAppUpdateManager` 相对方法表按 selector→IMP 重新解析，原始入口字节和字段 `0x18`/`0x19` 均逐点核对。
+- **269332**：微信 4.1.12，**`parseRevokeXML` 被重新编译**——旧的几何特征（入口 `stp x24,x23` + `cbz w0` 在 `entry+0x270` + `str x0,[x19,#0x168]` 在 `entry+0xA04`）不再逐字命中，整片也重定位。定位方式是**对参考二进制做 diff**：从腾讯 CDN 取 4.1.11（`WeChatMac_4.1.11.dmg`，实测为构建 `269111`，`parseRevokeXML` 入口 `0x4509ed4`，几何特征仍唯一命中），把该函数体按"屏蔽地址相关立即数后的指令形状"在 4.1.12 切片里滑窗匹配，唯一强命中在 `0x462f420`（匹配率 0.76，次优仅 0.17；入口前缀仍是 `stp x24,x23 / stp x22,x21 / stp x20,x19`）。`cbz w0` 守卫仍在 `entry+0x270`（`0x462f690`），但其后被编译器插入了一次调用，把 `newmsgid` 写入下推到 `entry+0xA10`（`0x462fe30`）。**关键：消息结构体布局变了**——`newMsgId` 从 `0x168` 移到 `0x198`，`replaceMsg`（`std::string`）从 `0x170` 移到 `0x1A0`。两个偏移都从**本二进制**的 `str`/`ldr` 指令重新解码：`newmsgid` 写入是 `str x0,[x19,#0x198]`，而函数体内 4 处 `ldr x0,[x19,#0x1A0]` 与参考里 4 处 `ldr x0,[x19,#0x170]` 一一对应（参考里已无 `0x170` 之外的对应、目标里已无 `0x170` 访问）。`revoke`（`0x462f690`，`cbz w0,+0x208`→`b +0x208`）、`revoke-tip` 字段写入（`0x462fe30`）、内联 hook 入口（`0x462f420`）原始字节逐点核对。SLOT `0x9a53f00` 取 `__common` 结束地址 `0x9a53718` 与 `__DATA` 结束地址 `0x9a54000` 之间的零填充，`adrp/ldr/br` 入口桩经回环解码验证到同一地址。屏蔽更新 8 处经本构建 `XAppUpdateManager` 的 selector→IMP 表重新解析，8 个方法入口字节与参考 `269111` **逐字节一致**（仅地址重定位），访问器字段仍为 `0x18`/`0x19`。所有补丁点已通过真实工具 `install --dry-run`（silent / runtime-tip / block-update 三种模式）确认原始字节匹配。
 
 ---
 
@@ -144,9 +146,10 @@
 
 1. **拿到目标 `wechat.dylib`**：从对应版本的微信 App 里取 `Contents/Resources/wechat.dylib`。
 2. **定位 `parseRevokeXML`**：按已知函数体几何特征（入口 `stp` 序列、`cbz w0`、`str x0,[x19,#0x168]`）在 arm64 切片里搜，确认唯一命中。
+   - **几何特征失配时**（函数被重编译，命中数为 0 或 >1，如 `269332`）：改用**参考二进制 diff**。取一个已支持的邻近构建（如从腾讯 CDN `WeChatMac_4.1.x.dmg` 下载 4.1.11），在参考里用几何特征定位 `parseRevokeXML`，把函数体"屏蔽掉地址相关立即数（`adrp`/`bl`/`b`/`b.cond`/`cbz`/`ldr literal` 的偏移）后的指令形状"在新切片里滑窗匹配，唯一强命中即目标函数；再用 `SequenceMatcher` 对齐把 `cbz`/`str` 逐条映射过去。
 3. **确定补丁点**：
-   - `revoke`：入口 `cbz`（`E00F0034` → `7F000014`）。
-   - `revoke-tip`：入口保持 + `str x0,[x19,#0x168]`（`60B600F9` → `7FB600F9`）。
+   - `revoke`：入口 `cbz`（`E00F0034` → `7F000014`）。**注意分支偏移可能变**（`269332` 是 `cbz w0,+0x208`），补丁的 `b` 要跳到与 `cbz` 相同的目标。
+   - `revoke-tip`：入口保持 + `str x0,[x19,#0x168]`（`60B600F9` → `7FB600F9`）。**字段偏移不要照抄**：从本二进制的 `str` 指令重新解码 `newMsgId` 偏移（`269332` 已从 `0x168` 变为 `0x198`），`replaceMsg` = `newMsgId + 8`（再用函数体内 `ldr …,[x19,#replace]` 交叉核对）。
    - 屏蔽更新：按上一节的方式（字节 diff 老版本，或解析 `XAppUpdateManager` 方法表）。
 4. **判断 hook 机制**：函数还带派发桩 → 走 `revokeHookConfigs`（无 `runtime-tip` 目标）；已无派发桩 → 走内联 hook，新增 `runtime-tip` 目标 + `inlineRevokeHookConfigs` 条目，并在 `__DATA` 尾找一处零填充空隙做 `SLOT`。
 5. **登记支持**：把构建号加进 `RuntimeTipInstaller.supportedBuildVersions`（`CLI.swift`）和 `Runtime.mm` 相应的表。
