@@ -112,6 +112,19 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // XAppUpdateManager's ObjC selector->IMP table (all 8 sites byte-identical to the reference,
     // only relocated).
     {"269332", 0x462f420, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462f42c, 0x198, 0x1a0},
+    // 269333 (WeChat 4.1.12 hotfix): same marketing version as 269332, but the whole slice
+    // was rebased, so every site shifted. Unlike 269332 (which needed a reference-binary diff
+    // because parseRevokeXML was recompiled), here the recompiled geometry from 269332 still
+    // holds verbatim: the entry prologue (stp x24,x23 / stp x22,x21 / stp x20,x19), the
+    // cbz w0,+0x208 guard, a single str x0,[x19,#0x198] newmsgid store, and exactly four
+    // ldr x0,[x19,#0x1A0] replaceMsg loads all reappear as a unique geometry match, relocated
+    // to 0x463ed18. Field offsets 0x198/0x1A0 were re-decoded from THIS binary's str/ldr. The
+    // runtime-tip stub targets fresh zero-fill slack at 0x9a6bf00 (between __common end
+    // 0x9a68a18 and __DATA end 0x9a6c000); the runtime self-locates it by decoding the patched
+    // entry. Update blocking was re-resolved via XAppUpdateManager's ObjC selector->IMP table
+    // (all 8 sites byte-identical to 269332, only relocated; accessor ivar fields still
+    // 0x18/0x19, accessors contiguous 8-byte functions at 0x27b1c0..0x27b1d8).
+    {"269333", 0x463ed18, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x463ed24, 0x198, 0x1a0},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
