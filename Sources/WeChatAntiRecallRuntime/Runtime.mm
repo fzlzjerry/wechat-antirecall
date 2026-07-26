@@ -133,6 +133,15 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // selector-to-IMP table; all eight entry bytes and the 0x18/0x19 accessor fields
     // retain the same semantics as 269333.
     {"269334", 0x461d624, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x461d630, 0x198, 0x1a0},
+    // 269338 (WeChat 4.1.12 hotfix, currently installed on macOS): the 269332+ geometry is
+    // still the unique match across the arm64 slice and relocates to 0x462da00 — cbz w0,+0x208
+    // guard at entry+0x270, a single str x0,[x19,#0x198] newmsgid store at entry+0xA10, and
+    // exactly four ldr x0,[x19,#0x1A0] replaceMsg loads. Field offsets 0x198/0x1A0 re-decoded
+    // from THIS binary's str/ldr. The entry stub targets zero-fill slack at 0x9a9ff00 (between
+    // __common end 0x9a9ea68 and __DATA end 0x9aa0000). Update blocking was re-resolved from
+    // XAppUpdateManager's relative selector->IMP table; all eight sites are byte-identical to
+    // 269334 (only relocated by a uniform +0x1000), and the 0x18/0x19 accessor ivar fields hold.
+    {"269338", 0x462da00, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462da0c, 0x198, 0x1a0},
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
