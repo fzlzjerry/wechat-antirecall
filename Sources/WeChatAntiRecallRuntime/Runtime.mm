@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,7 +29,11 @@ constexpr size_t revokeContentCacheMaximumCount = 512;
 constexpr size_t revokeContentPreviewMaximumBytes = 240;
 constexpr size_t arm64StubLength = 16;
 
-using ParseRevokeXML = bool (*)(void *, std::string *, void *, uint32_t);
+// IDA 9.4 call-site analysis (269340, wrapper 0x462dfec -> TryParseMessageXML
+// 0x462e200) confirms this function takes exactly three arguments. The second argument
+// is the raw XML and the wrapper has already copied it into handlerOutput+0x1A0.
+using ParseRevokeXML = bool (*)(void *, std::string *, void *);
+using FinalizeMessage = void (*)(void *, int);
 
 struct RevokeHookConfig {
     const char *buildVersion;
@@ -59,6 +64,21 @@ struct InlineRevokeHookConfig {
     uintptr_t continuationOffset;
     ptrdiff_t newMsgIdOffset;
     ptrdiff_t replaceMsgOffset;
+};
+
+// The revoke XML handler is selected only for message-extension types 71/72, so it
+// cannot observe ordinary text/media messages. Build 269340 therefore carries a
+// second inline hook at the common Message finalizer. IDA shows every incoming
+// Message reaches this function after serverId/msgType/content have been populated
+// and immediately before its type-specific extension parser is dispatched.
+struct InlineMessageCaptureHookConfig {
+    const char *buildVersion;
+    uintptr_t entryOffset;
+    uint32_t savedInstructions[inlineSavedInstructionCount];
+    uintptr_t continuationOffset;
+    ptrdiff_t serverIdOffset;
+    ptrdiff_t msgTypeOffset;
+    ptrdiff_t contentOffset;
 };
 
 constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
@@ -133,7 +153,7 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // selector-to-IMP table; all eight entry bytes and the 0x18/0x19 accessor fields
     // retain the same semantics as 269333.
     {"269334", 0x461d624, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x461d630, 0x198, 0x1a0},
-    // 269338 (WeChat 4.1.12 hotfix, currently installed on macOS): the 269332+ geometry is
+    // 269338 (WeChat 4.1.12 hotfix): the 269332+ geometry is
     // still the unique match across the arm64 slice and relocates to 0x462da00 — cbz w0,+0x208
     // guard at entry+0x270, a single str x0,[x19,#0x198] newmsgid store at entry+0xA10, and
     // exactly four ldr x0,[x19,#0x1A0] replaceMsg loads. Field offsets 0x198/0x1A0 re-decoded
@@ -142,19 +162,44 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // XAppUpdateManager's relative selector->IMP table; all eight sites are byte-identical to
     // 269334 (only relocated by a uniform +0x1000), and the 0x18/0x19 accessor ivar fields hold.
     {"269338", 0x462da00, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462da0c, 0x198, 0x1a0},
+    // 269340 (WeChat 4.1.12 hotfix): IDA 9.4 identifies 0x462e200 as the XML parser
+    // selected by the message-extension handler for types 71/72. Its wrapper at
+    // 0x462dfec passes exactly three arguments. The 269332+ revoke geometry is still
+    // unique (entry+0x270 guard, entry+0xA10 newmsgid store), with output fields
+    // newMsgId=0x198 and replaceMsg=0x1A0. The entry stub uses SLOT 0x9a9ff00.
+    {"269340", 0x462e200, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462e20c, 0x198, 0x1a0},
+};
+
+constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
+    // 269340: sub_45CE1A4 is the common Message finalizer. Its network-message
+    // constructor sub_45CCE50 populates serverId at +0xF8, msgType at +0x0C and
+    // std::string content at +0x130, then unconditionally calls this function.
+    // The first three instructions (ldrb/cmp/ccmp) are replayed by the trampoline;
+    // the continuation starts at the original conditional branch. SLOT 0x9a9ff08
+    // is the next aligned qword after the revoke hook's 0x9a9ff00 slot.
+    {
+        "269340",
+        0x45ce1a4,
+        {0x39494008, 0x7100051F, 0x7A400820},
+        0x45ce1b0,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
 };
 
 ParseRevokeXML originalParseRevokeXML = nullptr;
+FinalizeMessage originalFinalizeMessage = nullptr;
 const RevokeHookConfig *activeRevokeHookConfig = nullptr;
+const InlineMessageCaptureHookConfig *activeMessageCaptureHookConfig = nullptr;
 // Backing storage for the offsets used by hookedParseRevokeXML when the active hook
 // is an inline hook (the InlineRevokeHookConfig builds a compatible RevokeHookConfig).
 RevokeHookConfig activeInlineRevokeHookConfig = {nullptr, 0, 0, 0};
 std::mutex revokeTimeCacheMutex;
 std::unordered_map<std::string, std::string> revokeTimeCache;
-// Maps a recalled message's newmsgid -> a short content preview captured when the
-// message first arrived (the receive-path hook fills this; see installRevokeTipHook).
-// The revoke hook reads it back to substitute {content} in the configured tip. Keyed by
-// "id:<newmsgid>", the same scheme revokeTimeCacheKey uses, so receive and revoke agree.
+// Maps a recalled message's newmsgid -> a short content preview captured by the
+// common Message-finalizer hook. The revoke hook reads it back to substitute
+// {content}. Keyed by "id:<newmsgid>", the same scheme revokeTimeCacheKey uses.
 std::mutex revokeContentCacheMutex;
 std::unordered_map<std::string, std::string> revokeContentCache;
 
@@ -856,6 +901,33 @@ bool lookupRevokeContentPreview(uint64_t newMsgId, std::string &out) {
     return true;
 }
 
+void captureReceivedContentPreview(
+    void *message,
+    const InlineMessageCaptureHookConfig *config
+) {
+    if (message == nullptr || config == nullptr) {
+        return;
+    }
+
+    const auto *serverId = reinterpret_cast<const uint64_t *>(
+        reinterpret_cast<const uint8_t *>(message) + config->serverIdOffset
+    );
+    const auto *msgType = reinterpret_cast<const uint32_t *>(
+        reinterpret_cast<const uint8_t *>(message) + config->msgTypeOffset
+    );
+    const auto *content = reinterpret_cast<const std::string *>(
+        reinterpret_cast<const uint8_t *>(message) + config->contentOffset
+    );
+    if (!isAddressRangeReadable(serverId, sizeof(*serverId)) ||
+        !isAddressRangeReadable(msgType, sizeof(*msgType)) ||
+        !isAddressRangeReadable(content, sizeof(*content)) ||
+        *serverId == 0) {
+        return;
+    }
+
+    rememberRevokeContentPreview(*serverId, contentPreviewForReceivedMessage(*msgType, *content));
+}
+
 void replaceTimePlaceholder(std::string &rendered, const std::string &timeText) {
     if (!timeText.empty()) {
         replaceAll(rendered, "{time}", timeText);
@@ -1204,7 +1276,7 @@ NSString *nsStringFromStdString(const std::string &value) {
     return string == nil ? @"<non-utf8>" : string;
 }
 
-void logRevokeProbe(uint32_t msgType, uint64_t newMsgId, const std::string &replaceMsg, const std::string *xml) {
+void logRevokeProbe(uint64_t newMsgId, const std::string &replaceMsg, const std::string *xml) {
     @autoreleasepool {
         // The probe is opt-in (debugProbeEnabled) and exists precisely to show this data
         // to whoever turned it on, so log it as public — NSLog/%@ would otherwise redact
@@ -1213,8 +1285,7 @@ void logRevokeProbe(uint32_t msgType, uint64_t newMsgId, const std::string &repl
         const std::string xmlPreview = xml == nullptr ? "<nil>" : previewString(*xml);
         os_log(
             OS_LOG_DEFAULT,
-            "[WeChatAntiRecall] revoke probe msgType=%u newmsgid=%llu replaceMsg=%{public}s xml=%{public}s",
-            msgType,
+            "[WeChatAntiRecall] revoke probe newmsgid=%llu replaceMsg=%{public}s xml=%{public}s",
             newMsgId,
             replacePreview.c_str(),
             xmlPreview.c_str()
@@ -1312,12 +1383,12 @@ char *copyNSString(NSString *value) {
     return copyCString([value UTF8String]);
 }
 
-bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t msgType) {
+bool hookedParseRevokeXML(void *message, std::string *xml, void *flag) {
     if (originalParseRevokeXML == nullptr) {
         return false;
     }
 
-    const bool result = originalParseRevokeXML(message, xml, flag, msgType);
+    const bool result = originalParseRevokeXML(message, xml, flag);
     if (!result || message == nullptr || xml == nullptr) {
         return result;
     }
@@ -1351,7 +1422,7 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
 
     @autoreleasepool {
         if (debugProbeEnabled()) {
-            logRevokeProbe(msgType, originalNewMsgId, originalReplaceMsg, xml);
+            logRevokeProbe(originalNewMsgId, originalReplaceMsg, xml);
             logRevokeMessageStructProbe(message, config);
         }
 
@@ -1367,8 +1438,8 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
         if (phrase != nullptr) {
             *newMsgId = 0;
             const auto timeText = stableRevokeTimeText(originalNewMsgId, xml, originalReplaceMsg, currentTimeText());
-            // message+0x168 was already zeroed by the static str-xzr patch before this
-            // hook ran, so use the real newmsgid carried by the XML to join against the
+            // message+newMsgIdOffset was already zeroed by the static str-xzr patch
+            // before this hook ran, so use the real newmsgid carried by the XML to join against the
             // content captured on the receive path. Empty on a cold-cache miss → {content}
             // strips cleanly.
             uint64_t contentKey = 0;
@@ -1380,6 +1451,18 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag, uint32_t 
     }
 
     return result;
+}
+
+void hookedFinalizeMessage(void *message, int mode) {
+    if (originalFinalizeMessage == nullptr) {
+        return;
+    }
+
+    // Capture before the original finalizer dispatches the selected extension parser.
+    // The network-message constructor has already populated all three fields at this
+    // point, while later handlers may normalize or replace the raw content.
+    captureReceivedContentPreview(message, activeMessageCaptureHookConfig);
+    originalFinalizeMessage(message, mode);
 }
 
 struct WeChatDylibImage {
@@ -1585,6 +1668,18 @@ const InlineRevokeHookConfig *inlineRevokeHookConfigForBuild(const char *buildVe
     return nullptr;
 }
 
+const InlineMessageCaptureHookConfig *inlineMessageCaptureHookConfigForBuild(const char *buildVersion) {
+    if (buildVersion == nullptr) {
+        return nullptr;
+    }
+    for (const auto &config : inlineMessageCaptureHookConfigs) {
+        if (std::strcmp(config.buildVersion, buildVersion) == 0) {
+            return &config;
+        }
+    }
+    return nullptr;
+}
+
 void installRevokeTipStubHook(const WeChatDylibImage &image, const RevokeHookConfig *config) {
     const uintptr_t originalBodyAddress = image.slide + config->originalBody;
     const uintptr_t hookSlotAddress = resolveParseRevokeXMLHookSlot(originalBodyAddress, image.start, image.size);
@@ -1660,6 +1755,49 @@ void installRevokeTipInlineHook(const WeChatDylibImage &image, const InlineRevok
     }
 }
 
+void installMessageCaptureInlineHook(
+    const WeChatDylibImage &image,
+    const InlineMessageCaptureHookConfig *config
+) {
+    const uintptr_t entryAddress = image.slide + config->entryOffset;
+    if (!rangeContains(image.start, image.size, entryAddress, 3 * sizeof(uint32_t)) ||
+        !isAddressRangeReadable(reinterpret_cast<const void *>(entryAddress), 3 * sizeof(uint32_t))) {
+        return;
+    }
+
+    uint32_t entryWords[3];
+    std::memcpy(entryWords, reinterpret_cast<const void *>(entryAddress), sizeof(entryWords));
+    const uint64_t slotAddress = decodeEntryStubSlot(entryWords, entryAddress);
+    if (slotAddress == 0 ||
+        !rangeContains(image.start, image.size, slotAddress, sizeof(void *)) ||
+        !isAddressRangeReadable(reinterpret_cast<const void *>(slotAddress), sizeof(void *))) {
+        return;
+    }
+
+    auto **slot = reinterpret_cast<void **>(slotAddress);
+    if (*slot == reinterpret_cast<void *>(&hookedFinalizeMessage)) {
+        return;
+    }
+
+    size_t trampolineAllocSize = 0;
+    void *trampoline = buildInlineTrampoline(
+        config->savedInstructions,
+        image.slide + config->continuationOffset,
+        trampolineAllocSize
+    );
+    if (trampoline == nullptr) {
+        return;
+    }
+
+    originalFinalizeMessage = reinterpret_cast<FinalizeMessage>(trampoline);
+    activeMessageCaptureHookConfig = config;
+    if (!writeHookSlot(slot, reinterpret_cast<void *>(&hookedFinalizeMessage))) {
+        originalFinalizeMessage = nullptr;
+        activeMessageCaptureHookConfig = nullptr;
+        munmap(trampoline, trampolineAllocSize);
+    }
+}
+
 void installRevokeTipHook() {
     WeChatDylibImage image = {};
     if (!findWeChatDylibImage(image)) {
@@ -1669,10 +1807,12 @@ void installRevokeTipHook() {
     const std::string buildVersion = currentBundleBuildVersion();
     if (const auto *config = revokeHookConfigForBuild(buildVersion.c_str())) {
         installRevokeTipStubHook(image, config);
-        return;
-    }
-    if (const auto *inlineConfig = inlineRevokeHookConfigForBuild(buildVersion.c_str())) {
+    } else if (const auto *inlineConfig = inlineRevokeHookConfigForBuild(buildVersion.c_str())) {
         installRevokeTipInlineHook(image, inlineConfig);
+    }
+
+    if (const auto *captureConfig = inlineMessageCaptureHookConfigForBuild(buildVersion.c_str())) {
+        installMessageCaptureInlineHook(image, captureConfig);
     }
 }
 
@@ -1764,6 +1904,32 @@ char *wechat_antirecall_content_preview_for_received_message_copy(uint32_t conte
     return copyCString(contentPreviewForReceivedMessage(contentMsgType, raw).c_str());
 }
 
+void wechat_antirecall_capture_received_content_for_test(
+    uint64_t serverId,
+    uint32_t msgType,
+    const char *rawContent
+) {
+    constexpr ptrdiff_t serverIdOffset = 0x0f8;
+    constexpr ptrdiff_t msgTypeOffset = 0x00c;
+    constexpr ptrdiff_t contentOffset = 0x130;
+    alignas(std::string) uint8_t message[contentOffset + sizeof(std::string)] = {};
+    std::memcpy(message + serverIdOffset, &serverId, sizeof(serverId));
+    std::memcpy(message + msgTypeOffset, &msgType, sizeof(msgType));
+    const std::string raw = rawContent == nullptr ? "" : rawContent;
+    auto *content = new (message + contentOffset) std::string(raw);
+    const InlineMessageCaptureHookConfig config = {
+        "test",
+        0,
+        {0, 0, 0},
+        0,
+        serverIdOffset,
+        msgTypeOffset,
+        contentOffset,
+    };
+    captureReceivedContentPreview(message, &config);
+    content->~basic_string();
+}
+
 void wechat_antirecall_free(void *pointer) {
     std::free(pointer);
 }
@@ -1832,6 +1998,14 @@ int selftestHookedFunction(void) {
     }
     return selftestOriginalFunction() + 0x100;
 }
+
+int (*selftestOriginalConditionalFunction)(void *, int) = nullptr;
+int selftestHookedConditionalFunction(void *message, int mode) {
+    if (selftestOriginalConditionalFunction == nullptr) {
+        return -1;
+    }
+    return selftestOriginalConditionalFunction(message, mode) + 0x100;
+}
 } // namespace
 
 int wechat_antirecall_inline_hook_selftest(void) {
@@ -1893,6 +2067,75 @@ int wechat_antirecall_inline_hook_selftest(void) {
     }
 
     return result == 0x111 ? 1 : 0;
+}
+
+int wechat_antirecall_message_capture_inline_hook_selftest(void) {
+    const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    void *region = mmap(nullptr, 2 * pageSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (region == MAP_FAILED) {
+        return 0;
+    }
+
+    void *codeRegion = region;
+    void *slotRegion = static_cast<uint8_t *>(region) + pageSize;
+    const uint64_t entryAddress = reinterpret_cast<uint64_t>(codeRegion);
+    const uint64_t slotAddress = reinterpret_cast<uint64_t>(slotRegion);
+
+    uint32_t stub[3];
+    if (!encodeEntryStub(entryAddress, slotAddress, stub)) {
+        munmap(region, 2 * pageSize);
+        return 0;
+    }
+
+    // Exact 269340 Message-finalizer prefix, followed by a tiny conditional body:
+    // byte(+0x250)==1 && mode==0 returns 0x11; every other case returns 0x22.
+    // The trampoline's literal load and register branch must preserve NZCV from ccmp
+    // so the original b.eq still selects the right path.
+    const uint32_t savedPrefix[inlineSavedInstructionCount] = {
+        0x39494008u,  // ldrb w8,[x0,#0x250]
+        0x7100051fu,  // cmp  w8,#1
+        0x7a400820u,  // ccmp w1,#0,#0,eq
+    };
+    const uint32_t fakeWords[9] = {
+        stub[0], stub[1], stub[2],
+        0x54000080u,  // b.eq +16 -> word 7
+        0x52800440u,  // mov w0,#0x22
+        0xd65f03c0u,  // ret
+        0xd503201fu,  // nop
+        0x52800220u,  // mov w0,#0x11
+        0xd65f03c0u,  // ret
+    };
+    std::memcpy(codeRegion, fakeWords, sizeof(fakeWords));
+    if (mprotect(codeRegion, pageSize, PROT_READ | PROT_EXEC) != 0) {
+        munmap(region, 2 * pageSize);
+        return 0;
+    }
+    sys_icache_invalidate(codeRegion, sizeof(fakeWords));
+
+    size_t trampolineAllocSize = 0;
+    void *trampoline = buildInlineTrampoline(savedPrefix, entryAddress + 12, trampolineAllocSize);
+    if (trampoline == nullptr) {
+        munmap(region, 2 * pageSize);
+        return 0;
+    }
+
+    selftestOriginalConditionalFunction = reinterpret_cast<int (*)(void *, int)>(trampoline);
+    *reinterpret_cast<void **>(slotRegion) = reinterpret_cast<void *>(&selftestHookedConditionalFunction);
+
+    alignas(uint64_t) uint8_t fakeMessage[0x251] = {};
+    auto target = reinterpret_cast<int (*)(void *, int)>(codeRegion);
+    fakeMessage[0x250] = 1;
+    const int equalResult = target(fakeMessage, 0);
+    fakeMessage[0x250] = 0;
+    const int unequalResult = target(fakeMessage, 0);
+
+    selftestOriginalConditionalFunction = nullptr;
+    munmap(region, 2 * pageSize);
+    if (trampolineAllocSize > 0) {
+        munmap(trampoline, trampolineAllocSize);
+    }
+
+    return equalResult == 0x111 && unequalResult == 0x122 ? 1 : 0;
 }
 
 __attribute__((constructor))

@@ -335,6 +335,31 @@ final class PatchConfigTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269338"))
     }
 
+    func testBuild269340SupportsInlineHookRecallPatchesAndUpdateBlock() throws {
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "269340" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip", "update", "runtime-tip"])
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke" }?.entries.first?.address, 0x462e470)
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke-tip" }?.entries.map(\.address), [0x462e470, 0x462ec10])
+
+        let update = try XCTUnwrap(config.targets.first { $0.identifier == "update" })
+        XCTAssertEqual(update.entries.map(\.address), [
+            0x26e4c0, 0x2706ec, 0x2709bc, 0x270ddc,
+            0x27b1d0, 0x27b1d8, 0x27b1e0, 0x27b1e8
+        ])
+        XCTAssertTrue(update.entries.allSatisfy { $0.patchBytes.suffix(4) == (try! Data(hexString: "C0035FD6")) })
+
+        let runtimeTip = try XCTUnwrap(config.targets.first { $0.identifier == "runtime-tip" })
+        XCTAssertEqual(runtimeTip.entries[0].address, 0x462e200)
+        XCTAssertEqual(runtimeTip.entries[0].expectedBytes, [try Data(hexString: "F85FBCA9F65701A9F44F02A9")])
+        XCTAssertEqual(runtimeTip.entries[0].patchBytes, try Data(hexString: "90A302B0108247F900021FD6"))
+        XCTAssertEqual(runtimeTip.entries[1].address, 0x45ce1a4)
+        XCTAssertEqual(runtimeTip.entries[1].expectedBytes, [try Data(hexString: "084049391F0500712008407A")])
+        XCTAssertEqual(runtimeTip.entries[1].patchBytes, try Data(hexString: "90A602B0108647F900021FD6"))
+        XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269340"))
+    }
+
     private func loadPatchConfigs() throws -> [VersionConfig] {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("patches.json")

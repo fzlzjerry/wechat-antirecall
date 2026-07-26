@@ -1,6 +1,6 @@
 # 维护指南
 
-面向维护者：`patches.json` 结构、各补丁目标的含义、运行时 hook 的两种机制、屏蔽更新补丁点的逆向来源、逐字节核对记录、`{content}` 现状，以及**如何新增一个构建号**。
+面向维护者：`patches.json` 结构、各补丁目标的含义、运行时 hook 的两种机制、屏蔽更新补丁点的逆向来源、逐字节核对记录、`{content}` 实现，以及**如何新增一个构建号**。
 
 用户向的使用说明在 [README.md](README.md)。
 
@@ -47,7 +47,7 @@
 | --- | --- | --- |
 | `revoke` | 静默防撤回 | 默认（不加 tip 参数） |
 | `revoke-tip` | 提示模式 | `--with-tip` |
-| `runtime-tip` | 内联 hook 的入口改写（仅内联构建） | `--runtime-tip` |
+| `runtime-tip` | 内联 hook 的入口改写（仅内联构建；269340 含两处） | `--runtime-tip` |
 | `update` | 屏蔽自动更新 | `--block-update` / `--update-only` |
 | `multiInstance` | 多开（主二进制） | `--multi-instance` |
 | `multiInstance-extra` | 多开的附加补丁（dylib） | `--multi-instance` |
@@ -83,7 +83,7 @@
 
 这些构建去掉了派发桩，改用**静态入口改写 + 运行时 trampoline**：
 
-- 安装时把 `parseRevokeXML` 入口的 3 条指令改成 `adrp x16,SLOT; ldr x16,[x16]; br x16`（patches.json 的 `runtime-tip` 目标）。`SLOT` 落在 `wechat.dylib` `__DATA` 段尾的零填充空隙里。
+- 安装时把目标函数入口的 3 条指令改成 `adrp x16,SLOT; ldr x16,[x16]; br x16`（patches.json 的 `runtime-tip` 目标；269340 同时改写撤回解析器和 Message 终结器）。`SLOT` 落在 `wechat.dylib` `__DATA` 段尾的零填充空隙里。
 - dylib 加载时建立 trampoline（重放原 3 条指令、再跳回入口后第 4 条），并把 hook 函数指针写进 `SLOT`。runtime 通过**解码被改写的入口**自动定位 `SLOT`，无需硬编码。
 - 配置在 `Runtime.mm` 的 `inlineRevokeHookConfigs`（build → 入口地址、原始 3 条指令、continuation 地址、字段偏移）。
 
@@ -98,23 +98,28 @@
 | 269332 | `0x462f420` | `0x9a53f00` | 微信 4.1.12，`parseRevokeXML` 被重编译（详见下方核对记录），字段偏移改为 `0x198`/`0x1A0` |
 | 269333 | `0x463ed18` | `0x9a6bf00` | 微信 4.1.12 热修，整片重定位。与 269332 不同：`parseRevokeXML` 的几何特征仍逐字命中（无需参考二进制 diff），字段偏移仍 `0x198`/`0x1A0` |
 | 269334 | `0x461d624` | `0x9a87f00` | 微信 4.1.12 热修；269332+ 几何特征仍唯一命中，字段偏移仍 `0x198`/`0x1A0` |
-| 269338 | `0x462da00` | `0x9a9ff00` | 微信 4.1.12 热修（当前 macOS 安装版）；269332+ 几何特征仍唯一命中，字段偏移仍 `0x198`/`0x1A0`，屏蔽更新 8 处相对 269334 均匀 `+0x1000` |
+| 269338 | `0x462da00` | `0x9a9ff00` | 微信 4.1.12 热修；269332+ 几何特征仍唯一命中，字段偏移仍 `0x198`/`0x1A0`，屏蔽更新 8 处相对 269334 均匀 `+0x1000` |
+| 269340 | `0x462e200` + `0x45ce1a4` | `0x9a9ff00` + `0x9a9ff08` | 微信 4.1.12 热修（当前 macOS 安装版）；撤回 XML hook 与通用 Message 终结器 hook 分离，后者填充 `{content}` 缓存 |
 
-⚠️ **入口改写和 dylib 注入必须成对安装**：`--runtime-tip` 会一起完成二者，`RuntimeTipInstaller` 先跑注入。绝不要单独只打入口补丁——缺少 dylib 时 `SLOT` 不会被赋值，函数会跳空指针崩溃。`restore` 恢复 `wechat.dylib` 备份会同时撤销入口补丁、`SLOT` 和注入。
+⚠️ **入口改写和 dylib 注入必须成对安装**：`--runtime-tip` 会一起完成二者，`RuntimeTipInstaller` 先跑注入。绝不要单独只打入口补丁——缺少 dylib 时 `SLOT` 不会被赋值，函数会跳空指针崩溃。`restore` 恢复 `wechat.dylib` 备份会同时撤销所有入口补丁、`SLOT` 和注入。
 
 内联 hook 引擎（指令编码、trampoline、跳转槽派发）有单元测试覆盖（`InlineHookEngineTests`、`RuntimeRewriteTests`）。
 
 ---
 
-## `{content}` 现状（未完成）
+## `{content}` 实现
 
-`{content}` 目前是**脚手架，未接线**：
+IDA Pro 9.4 对 269340 arm64 切片的聚焦分析确认：`0x462e200` 虽带有 `TryParseMessageXML` 日志且 ABI 确实只有三个参数，但其包装函数 `0x462dfec` 位于类型扩展 vtable，类型列表函数 `0x462df44` 只返回 `71/72`。因此该入口不是所有接收消息的公共路径；输出对象 `+0x198` 也是撤回 XML 解析后写入的目标 `newmsgid`，不能当作普通消息的 server ID。
 
-- 渲染与预览路径完整：`RecallTipPreview`（Swift）和 `renderRevokeTip`（`Runtime.mm`）都能替换 `{content}`，`tip-phrase preview` 能预览，`RuntimeRewriteTests` 覆盖了文本 / 媒体占位符 / 空内容剥离等分支。
-- runtime 里有内容缓存（`revokeContentCache`）、查表（`lookupRevokeContentPreview`）、预览构造（`contentPreviewForReceivedMessage`）和导出的测试辅助函数。
-- **但没有任何已安装的 hook 会调用 `rememberRevokeContentPreview` 去填这个缓存**——`installRevokeTipHook()` 只装了 `parseRevokeXML` 的 hook，没有接收消息路径的 hook。撤回 XML 本身不含原文，所以在真实运行的微信里 `lookupRevokeContentPreview` 永远 miss，`{content}` 始终为空（`replaceContentPlaceholder` 会连同分隔符一起剥掉）。
+真正的接收路径使用第二个内联 hook：`sub_45CE1A4`（入口 `0x45ce1a4`）是通用 Message 终结器。网络消息构造函数 `sub_45CCE50` 在调用它之前已经填好：
 
-对应 commit `3109071` 的措辞就是 "add {content} placeholder **foundation**"。要真正让 `{content}` 生效，需要新增一个接收消息路径的 hook，在收到消息时按 `newmsgid` 缓存内容预览。缓存本身有约束：只截取前若干 UTF-8 字节、上限 512 条、媒体只存类型占位符。
+- `serverId`：Message `+0xF8`；
+- `msgType`：Message `+0x0C`；
+- `content`（`std::string`）：Message `+0x130`。
+
+构造函数随后无条件调用终结器，终结器再从 Message `+0x218` 取出已选中的扩展对象并调用 vtable `+0x18` 解析。runtime 在原终结器之前按 `serverId` 缓存：文本做 trim 和 UTF-8 边界安全截断；媒体使用真实 `msgType` 映射为图片、语音、视频、动画表情、位置、链接、音视频通话或系统消息占位符。撤回 XML 到来时再用其中的 `<newmsgid>` 查表并替换 `{content}`。
+
+269340 的 `runtime-tip` 因此包含两个静态入口改写：撤回解析器写入 `SLOT 0x9a9ff00`，Message 终结器写入相邻的 `SLOT 0x9a9ff08`。缓存只存在于当前微信进程，最多 512 条；文本预览最多 240 个 UTF-8 字节。冷启动前收到、已淘汰或 server ID 为 0 的消息仍会 miss，此时 `replaceContentPlaceholder` 会连同分隔符一起剥掉。其他已支持构建尚未反向确认通用 Message 字段布局，因此仍按冷缓存处理 `{content}`。
 
 ---
 
@@ -142,9 +147,11 @@
 - **269332**：微信 4.1.12，**`parseRevokeXML` 被重新编译**——旧的几何特征（入口 `stp x24,x23` + `cbz w0` 在 `entry+0x270` + `str x0,[x19,#0x168]` 在 `entry+0xA04`）不再逐字命中，整片也重定位。定位方式是**对参考二进制做 diff**：从腾讯 CDN 取 4.1.11（`WeChatMac_4.1.11.dmg`，实测为构建 `269111`，`parseRevokeXML` 入口 `0x4509ed4`，几何特征仍唯一命中），把该函数体按"屏蔽地址相关立即数后的指令形状"在 4.1.12 切片里滑窗匹配，唯一强命中在 `0x462f420`（匹配率 0.76，次优仅 0.17；入口前缀仍是 `stp x24,x23 / stp x22,x21 / stp x20,x19`）。`cbz w0` 守卫仍在 `entry+0x270`（`0x462f690`），但其后被编译器插入了一次调用，把 `newmsgid` 写入下推到 `entry+0xA10`（`0x462fe30`）。**关键：消息结构体布局变了**——`newMsgId` 从 `0x168` 移到 `0x198`，`replaceMsg`（`std::string`）从 `0x170` 移到 `0x1A0`。两个偏移都从**本二进制**的 `str`/`ldr` 指令重新解码：`newmsgid` 写入是 `str x0,[x19,#0x198]`，而函数体内 4 处 `ldr x0,[x19,#0x1A0]` 与参考里 4 处 `ldr x0,[x19,#0x170]` 一一对应（参考里已无 `0x170` 之外的对应、目标里已无 `0x170` 访问）。`revoke`（`0x462f690`，`cbz w0,+0x208`→`b +0x208`）、`revoke-tip` 字段写入（`0x462fe30`）、内联 hook 入口（`0x462f420`）原始字节逐点核对。SLOT `0x9a53f00` 取 `__common` 结束地址 `0x9a53718` 与 `__DATA` 结束地址 `0x9a54000` 之间的零填充，`adrp/ldr/br` 入口桩经回环解码验证到同一地址。屏蔽更新 8 处经本构建 `XAppUpdateManager` 的 selector→IMP 表重新解析，8 个方法入口字节与参考 `269111` **逐字节一致**（仅地址重定位），访问器字段仍为 `0x18`/`0x19`。所有补丁点已通过真实工具 `install --dry-run`（silent / runtime-tip / block-update 三种模式）确认原始字节匹配。
 - **269333**：微信 4.1.12 热修（`CFBundleShortVersionString` 仍为 4.1.12，`CFBundleVersion` 269333）。整片相对 269332 重定位，所有站点移位。与 269332 不同，本构建**无需参考二进制 diff**——`parseRevokeXML` 的几何特征在整个 arm64 切片里**唯一逐字命中**：入口前缀 `stp x24,x23 / stp x22,x21 / stp x20,x19`（`F85FBCA9F65701A9F44F02A9`）、`entry+0x270` 的 `cbz w0,+0x208`、函数体内**一处** `str x0,[x19,#0x198]` 和**恰好四处** `ldr x0,[x19,#0x1A0]`，整体重定位到 `0x463ed18`。字段偏移 `0x198`/`0x1A0` 从**本二进制**的 `str`/`ldr` 指令重新解码（未照抄）。`revoke`（`0x463ef88`，`cbz w0,+0x208`→`b +0x208`，落点同 `0x463f190`）、`revoke-tip` 字段写入（`0x463f728`，`str x0,[x19,#0x198]`→`str xzr,…`）、内联 hook 入口（`0x463ed18`）原始字节逐点核对。SLOT `0x9a6bf00` 取 `__common` 结束地址 `0x9a68a18` 与 `__DATA` 结束地址 `0x9a6c000` 之间的零填充，`adrp/ldr/br` 入口桩（`70A102B0108247F900021FD6`）经回环解码验证到同一地址。屏蔽更新 8 处经本构建 `XAppUpdateManager` 的 selector→IMP 表重新解析（`startUpdater` `0x26e4c0`、`checkForUpdates:` `0x2706ec`、`startBackgroundUpdatesCheck:` `0x2709bc`、`enableAutoUpdate:` `0x270ddc`，访问器对 `0x27b1c0`/`0x27b1c8`/`0x27b1d0`/`0x27b1d8`），8 个方法入口字节与 269332 **逐字节一致**（仅地址重定位），访问器为连续的 8 字节函数、字段仍 `0x18`/`0x19`。所有补丁点已通过真实工具 `install --dry-run`（silent / runtime-tip / block-update 三种模式）确认原始字节匹配。
 
-- **269334**：微信 4.1.12 热修（`CFBundleVersion` 269334，当前 macOS 安装版）。269332+ 的函数几何特征在整个 arm64 切片中仍唯一命中：入口 `0x461d624`，`entry+0x270` 的 `cbz w0,+0x208` 在 `0x461d894`，`entry+0xA10` 的 `str x0,[x19,#0x198]` 在 `0x461e034`，函数体内仍只有一处该 store 和四处 `ldr x0,[x19,#0x1A0]`。字段偏移由本构建指令重新解码为 `0x198`/`0x1A0`。SLOT `0x9a87f00` 位于 `__common` 结束地址 `0x9a86558` 与 `__DATA` 结束地址 `0x9a88000` 之间的零填充，入口桩（`50A302D0108247F900021FD6`）回环解码到同一地址。屏蔽更新 8 处从本构建 `XAppUpdateManager` 的相对方法表重新解析：`startUpdater` `0x26c4c0`、`checkForUpdates:` `0x26e6ec`、`startBackgroundUpdatesCheck:` `0x26e9bc`、`enableAutoUpdate:` `0x26eddc`，访问器对 `0x2791c8`/`0x2791d0`/`0x2791d8`/`0x2791e0`；各入口原始字节与既有补丁语义一致，访问器字段仍为 `0x18`/`0x19`。
+- **269334**：微信 4.1.12 热修（`CFBundleVersion` 269334）。269332+ 的函数几何特征在整个 arm64 切片中仍唯一命中：入口 `0x461d624`，`entry+0x270` 的 `cbz w0,+0x208` 在 `0x461d894`，`entry+0xA10` 的 `str x0,[x19,#0x198]` 在 `0x461e034`，函数体内仍只有一处该 store 和四处 `ldr x0,[x19,#0x1A0]`。字段偏移由本构建指令重新解码为 `0x198`/`0x1A0`。SLOT `0x9a87f00` 位于 `__common` 结束地址 `0x9a86558` 与 `__DATA` 结束地址 `0x9a88000` 之间的零填充，入口桩（`50A302D0108247F900021FD6`）回环解码到同一地址。屏蔽更新 8 处从本构建 `XAppUpdateManager` 的相对方法表重新解析：`startUpdater` `0x26c4c0`、`checkForUpdates:` `0x26e6ec`、`startBackgroundUpdatesCheck:` `0x26e9bc`、`enableAutoUpdate:` `0x26eddc`，访问器对 `0x2791c8`/`0x2791d0`/`0x2791d8`/`0x2791e0`；各入口原始字节与既有补丁语义一致，访问器字段仍为 `0x18`/`0x19`。
 
-- **269338**：微信 4.1.12 热修（`CFBundleVersion` 269338，当前 macOS 安装版）。269332+ 的函数几何特征在整个 arm64 切片中仍**唯一逐字命中**（7504 处入口前缀里只有一处同时满足 `entry+0x270` 的 `cbz w0,+0x208`、恰好一处 `str x0,[x19,#0x198]`、恰好四处 `ldr x0,[x19,#0x1A0]`）：入口 `0x462da00`，`revoke` 的 `cbz w0,+0x208` 在 `entry+0x270`=`0x462dc70`（`40100034`→`82000014`，落点同 `0x462de78`），`revoke-tip` 的 `str x0,[x19,#0x198]` 在 `entry+0xA10`=`0x462e410`（`60CE00F9`→`7FCE00F9`）。字段偏移 `0x198`/`0x1A0` 从本构建指令重新解码。SLOT `0x9a9ff00` 取 `__DATA` 结束地址 `0x9aa0000` 减 `0x100`，位于 `__common` 结束地址 `0x9a9ea68` 与 `__DATA` 结束之间的零填充，入口桩（`90A302D0108247F900021FD6`）经 `decodeEntryStubSlot` 回环解码到同一地址。屏蔽更新 8 处从本构建 `XAppUpdateManager` 的相对 selector→IMP 表按方法名重新解析：`startUpdater` `0x26d4c0`、`checkForUpdates:` `0x26f6ec`、`startBackgroundUpdatesCheck:` `0x26f9bc`、`enableAutoUpdate:` `0x26fddc`，访问器对 `0x27a1c8`/`0x27a1d0`/`0x27a1d8`/`0x27a1e0`；8 个方法入口字节与 269334 **逐字节一致**（整片相对 269334 均匀重定位 `+0x1000`），`automaticallyDownloadsUpdates`/`canCheckForUpdate` 的 `ldrb`/`strb` 重新解码出访问器字段仍为 `0x18`/`0x19`。所有补丁点已通过真实工具 `install --dry-run`（silent / runtime-tip / block-update 三种模式）确认原始字节匹配。
+- **269338**：微信 4.1.12 热修（`CFBundleVersion` 269338）。269332+ 的函数几何特征在整个 arm64 切片中仍**唯一逐字命中**（7504 处入口前缀里只有一处同时满足 `entry+0x270` 的 `cbz w0,+0x208`、恰好一处 `str x0,[x19,#0x198]`、恰好四处 `ldr x0,[x19,#0x1A0]`）：入口 `0x462da00`，`revoke` 的 `cbz w0,+0x208` 在 `entry+0x270`=`0x462dc70`（`40100034`→`82000014`，落点同 `0x462de78`），`revoke-tip` 的 `str x0,[x19,#0x198]` 在 `entry+0xA10`=`0x462e410`（`60CE00F9`→`7FCE00F9`）。字段偏移 `0x198`/`0x1A0` 从本构建指令重新解码。SLOT `0x9a9ff00` 取 `__DATA` 结束地址 `0x9aa0000` 减 `0x100`，位于 `__common` 结束地址 `0x9a9ea68` 与 `__DATA` 结束之间的零填充，入口桩（`90A302D0108247F900021FD6`）经 `decodeEntryStubSlot` 回环解码到同一地址。屏蔽更新 8 处从本构建 `XAppUpdateManager` 的相对 selector→IMP 表按方法名重新解析：`startUpdater` `0x26d4c0`、`checkForUpdates:` `0x26f6ec`、`startBackgroundUpdatesCheck:` `0x26f9bc`、`enableAutoUpdate:` `0x26fddc`，访问器对 `0x27a1c8`/`0x27a1d0`/`0x27a1d8`/`0x27a1e0`；8 个方法入口字节与 269334 **逐字节一致**（整片相对 269334 均匀重定位 `+0x1000`），`automaticallyDownloadsUpdates`/`canCheckForUpdate` 的 `ldrb`/`strb` 重新解码出访问器字段仍为 `0x18`/`0x19`。所有补丁点已通过真实工具 `install --dry-run`（silent / runtime-tip / block-update 三种模式）确认原始字节匹配。
+
+- **269340**：微信 4.1.12 热修（`CFBundleVersion` 269340，当前 macOS 安装版）。在 IDA Pro 9.4 中对 arm64 切片做聚焦分析：包装函数 `0x462dfec` 调用的核心函数 `0x462e200` 带有 `TryParseMessageXML` 日志字符串，调用点明确只传 `x0` 输出对象、`x1` 原始内容 `std::string *`、`x2` 标志指针三个参数；同时 vtable `0x9479db0` 的类型列表方法 `0x462df44` 返回 `71/72`，证明它是撤回相关类型扩展而非通用接收路径。269332+ 的补丁几何仍唯一命中：入口 `0x462e200`，`revoke` 守卫 `entry+0x270`=`0x462e470`（`40100034`→`82000014`），`newmsgid` 写入 `entry+0xA10`=`0x462ec10`（`60CE00F9`→`7FCE00F9`），输出字段仍为 `0x198`/`0x1A0`。通用 Message 终结器 `sub_45CE1A4` 的入口为 `0x45ce1a4`；网络构造函数 `sub_45CCE50` 先填入 server ID `+0xF8`、msgType `+0x0C`、content `+0x130`，再调用终结器，而终结器从 `+0x218` 取扩展对象并通过 vtable `+0x18` 分发，故在此处增加第二个 receive-cache hook。`__DATA` 结束仍为 `0x9aa0000`、`__common` 结束为 `0x9a9ea68`；撤回槽 `0x9a9ff00` 的入口桩为 `90A302B0108247F900021FD6`，相邻接收槽 `0x9a9ff08` 的入口桩为 `90A602B0108647F900021FD6`。屏蔽更新 8 处为 `0x26e4c0`、`0x2706ec`、`0x2709bc`、`0x270ddc`、`0x27b1d0`、`0x27b1d8`、`0x27b1e0`、`0x27b1e8`，原始字节与既有方法语义一致。真实 `/Applications/WeChat.app` 已通过 `install --dry-run` 的 silent / runtime-tip / block-update 三种模式逐点确认。
 
 ---
 
@@ -159,7 +166,7 @@
    - `revoke`：入口 `cbz`（`E00F0034` → `7F000014`）。**注意分支偏移可能变**（`269332` 是 `cbz w0,+0x208`），补丁的 `b` 要跳到与 `cbz` 相同的目标。
    - `revoke-tip`：入口保持 + `str x0,[x19,#0x168]`（`60B600F9` → `7FB600F9`）。**字段偏移不要照抄**：从本二进制的 `str` 指令重新解码 `newMsgId` 偏移（`269332` 已从 `0x168` 变为 `0x198`），`replaceMsg` = `newMsgId + 8`（再用函数体内 `ldr …,[x19,#replace]` 交叉核对）。
    - 屏蔽更新：按上一节的方式（字节 diff 老版本，或解析 `XAppUpdateManager` 方法表）。
-4. **判断 hook 机制**：函数还带派发桩 → 走 `revokeHookConfigs`（无 `runtime-tip` 目标）；已无派发桩 → 走内联 hook，新增 `runtime-tip` 目标 + `inlineRevokeHookConfigs` 条目，并在 `__DATA` 尾找一处零填充空隙做 `SLOT`。
+4. **判断 hook 机制**：函数还带派发桩 → 走 `revokeHookConfigs`（无 `runtime-tip` 目标）；已无派发桩 → 走内联 hook，新增 `runtime-tip` 目标 + `inlineRevokeHookConfigs` 条目，并在 `__DATA` 尾找一处零填充空隙做 `SLOT`。若要支持 `{content}`，还必须从该构建重新确认通用 Message 接收/终结路径以及 serverId、msgType、content 三个字段偏移，再增加独立槽位；不得把撤回 handler 的输出字段当作普通 Message 字段照抄。
 5. **登记支持**：把构建号加进 `RuntimeTipInstaller.supportedBuildVersions`（`CLI.swift`）和 `Runtime.mm` 相应的表。
 6. **重算校验和**：改完 `patches.json` 后跑 `bash Scripts/hash-patches.sh` 刷新 `patches.json.sha256`，两个文件一起提交——GUI 的 OTA「拉取最新补丁数据」会拿它校验，sidecar 过期会让新构建号拉不下来。
 7. **校验**：`swift build`、`swift test`，再对真实二进制 `install --dry-run`（silent / runtime-tip / block-update 三种模式）确认每个补丁点原始字节匹配。

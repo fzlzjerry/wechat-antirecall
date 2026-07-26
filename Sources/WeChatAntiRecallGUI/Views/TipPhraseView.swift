@@ -44,7 +44,7 @@ struct TipPhraseView: View {
                 HStack(spacing: 8) {
                     placeholderChip("{from}", "发送者", enabled: true)
                     placeholderChip("{time}", "时间", enabled: true)
-                    placeholderChip("{content}", "内容·暂不可用", enabled: false)
+                    placeholderChip("{content}", "内容·269340", enabled: true)
                 }
 
                 if let err = controller.validationError {
@@ -79,7 +79,7 @@ struct TipPhraseView: View {
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-                Text("说明：{content} 目前恒为空——真实运行时不会填入被撤回的内容，因此预览里也会被省略。")
+                Text("说明：构建号 269340 会显示本次启动后缓存的文字或媒体类型；其他构建、冷缓存、已淘汰或 ID 缺失的消息会省略。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }

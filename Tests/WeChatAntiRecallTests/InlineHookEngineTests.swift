@@ -53,6 +53,22 @@ final class InlineHookEngineTests: XCTestCase {
         XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x462da00), 0x9a9ff00)
     }
 
+    func testEncoderMatchesRecorded269340StaticPatch() throws {
+        var bytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x462e200, 0x9a9ff00, &bytes), 1)
+        let hex = bytes.map { String(format: "%02X", $0) }.joined()
+        XCTAssertEqual(hex, "90A302B0108247F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x462e200), 0x9a9ff00)
+    }
+
+    func testEncoderMatchesRecorded269340MessageCapturePatch() throws {
+        var bytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x45ce1a4, 0x9a9ff08, &bytes), 1)
+        let hex = bytes.map { String(format: "%02X", $0) }.joined()
+        XCTAssertEqual(hex, "90A602B0108647F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x45ce1a4), 0x9a9ff08)
+    }
+
     /// Non-stub bytes must not decode as a slot (guards against false positives that
     /// would make the runtime treat an unpatched entry as installed).
     func testDecodeRejectsNonStubBytes() throws {
@@ -69,6 +85,13 @@ final class InlineHookEngineTests: XCTestCase {
         XCTAssertEqual(
             wechat_antirecall_inline_hook_selftest(), 1,
             "inline hook engine self-test failed: hook did not fire or original was not preserved"
+        )
+    }
+
+    func testMessageCaptureTrampolinePreservesConditionalFlags() throws {
+        XCTAssertEqual(
+            wechat_antirecall_message_capture_inline_hook_selftest(), 1,
+            "269340 Message-finalizer trampoline did not preserve the ccmp flags"
         )
     }
 }

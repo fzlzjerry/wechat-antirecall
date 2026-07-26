@@ -92,6 +92,7 @@ sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
 | 269333 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
 | 269334 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
 | 269338 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
+| 269340 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
 
 - **自定义提示**（`--runtime-tip`）只支持标 ✓ 的构建号；`268575`、`268596` 不支持，传了会报错。
 - **多开补丁**（`--multi-instance`）目前只有 `268575`。其余版本的多开请用 [`clone`](#多开clone) 命令，它不依赖构建号。
@@ -207,9 +208,9 @@ sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/
 
 ### 关于 `{content}`
 
-`{content}` 是一个受支持的占位符：`tip-phrase preview` 能正常预览它（文字消息显示原文，图片/语音等媒体显示 `[图片]`、`[语音]` 这类类型占位符）。
+`{content}` 是一个受支持的占位符：文字消息显示截断后的原文，图片/语音/视频/动画表情/位置/链接等 XML 消息显示 `[图片]`、`[语音]` 等类型占位符。
 
-但**当前运行时并没有安装"接收消息时缓存原文"的 hook**，所以在真实运行的微信里 `{content}` 取不到内容，会按空处理——连同它前面的分隔符一起省略，不会留下孤零零的"撤回："。也就是说，短语里可以写 `{content}`，但目前它在实际拦截时始终为空。这部分还是脚手架，详见 [MAINTAINING.md](MAINTAINING.md)。
+构建号 **269340** 会通过单独的 Message 接收路径 hook，按 server ID 缓存本次微信进程启动后收到的消息，再在撤回事件中用 `<newmsgid>` 查表。缓存只保留最近最多 512 条；启动前收到、已被淘汰或 ID 缺失的消息会按空处理，并连同 `{content}` 前的分隔符一起省略，不会留下孤零零的"撤回："。其他构建尚未接入接收路径，因此 `{content}` 仍为空。实现和 IDA 证据见 [MAINTAINING.md](MAINTAINING.md)。
 
 ### 短语存储位置
 
@@ -227,7 +228,7 @@ swift run wechat-antirecall tip-phrase probe on      # 打开
 swift run wechat-antirecall tip-phrase probe off     # 关闭
 ```
 
-`probe on` 会把 `msgType`、`newmsgid`、撤回提示和 XML 片段写进 macOS Console。日志可能包含聊天元数据，**收集完请及时关闭**。
+`probe on` 会把 `newmsgid`、撤回提示和 XML 片段写进 macOS Console。日志可能包含聊天元数据，**收集完请及时关闭**。
 
 ---
 
@@ -357,7 +358,7 @@ swift test                  # 运行单元测试
 
 ## 维护者文档
 
-补丁地址、`patches.json` 结构、运行时 hook 的两种机制（派发桩 vs 内联）、屏蔽更新补丁点的逆向来源、逐字节核对记录、`{content}` 现状、以及**如何新增一个构建号**，都在 → **[MAINTAINING.md](MAINTAINING.md)**。
+补丁地址、`patches.json` 结构、运行时 hook 的两种机制（派发桩 vs 内联）、屏蔽更新补丁点的逆向来源、逐字节核对记录、`{content}` 实现、以及**如何新增一个构建号**，都在 → **[MAINTAINING.md](MAINTAINING.md)**。
 
 ## 参考
 

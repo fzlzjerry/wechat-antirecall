@@ -32,19 +32,27 @@ char *wechat_antirecall_load_revoke_tip_phrase_for_home_copy(const char *homeDir
 char *wechat_antirecall_load_revoke_tip_phrase_for_home_and_bundle_copy(const char *homeDirectory, const char *bundleIdentifier);
 void wechat_antirecall_clear_revoke_tip_time_cache(void);
 
-// Recalled-content cache (newmsgid -> preview). The receive-path hook fills it and the
-// revoke hook reads it to substitute {content}. Exposed for unit testing the join and
-// the preview mapping without a running WeChat.
+// Recalled-content cache (newmsgid -> preview). The 269340 receive-path hook fills it
+// and the revoke hook reads it to substitute {content}. Exposed for unit testing the
+// join and preview mapping without a running WeChat.
 void wechat_antirecall_clear_revoke_content_cache(void);
 void wechat_antirecall_remember_revoke_content_for_test(uint64_t newMsgId, const char *preview);
 // Returns the cached preview for newMsgId (caller frees with wechat_antirecall_free), or
 // NULL if absent. Test-only window into the cache the receive hook fills.
 char *wechat_antirecall_lookup_revoke_content_for_test(uint64_t newMsgId);
 
-// Build the cached preview for a received message: trimmed/truncated text for the plain
-// -text type (1), or a localized type placeholder ("[图片]"/"[语音]"/…) for media. Caller
+// Build the cached preview for a received message: trimmed/truncated text for the
+// plain-text type (1), or a localized type placeholder ("[图片]"/"[语音]"/…) for media. Caller
 // owns the returned buffer (free with wechat_antirecall_free).
 char *wechat_antirecall_content_preview_for_received_message_copy(uint32_t contentMsgType, const char *rawContent);
+
+// Exercises the production Message-finalizer capture path with the same 269340 field
+// layout (serverId=+0xF8, msgType=+0x0C, content=+0x130).
+void wechat_antirecall_capture_received_content_for_test(
+    uint64_t serverId,
+    uint32_t msgType,
+    const char *rawContent
+);
 int wechat_antirecall_is_target_wechat_dylib_path(const char *imagePath);
 uintptr_t wechat_antirecall_revoke_hook_original_body_for_build(const char *buildVersion);
 int wechat_antirecall_should_inspect_revoke_message_fields(const char *xml);
@@ -79,6 +87,10 @@ uint64_t wechat_antirecall_decode_entry_stub_slot(const uint8_t *entry, uint64_t
 // write slot), calls it, and returns 1 iff the hook fired AND calling the captured
 // original still runs the real body and returns its value. Returns 0 on any failure.
 int wechat_antirecall_inline_hook_selftest(void);
+
+// End-to-end test using the exact 269340 Message-finalizer ldrb/cmp/ccmp prefix.
+// Verifies that the trampoline preserves NZCV before jumping to the original b.eq.
+int wechat_antirecall_message_capture_inline_hook_selftest(void);
 
 #ifdef __cplusplus
 }

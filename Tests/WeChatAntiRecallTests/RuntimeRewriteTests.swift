@@ -488,6 +488,28 @@ final class RuntimeRewriteTests: XCTestCase {
         XCTAssertEqual(try receivedPreview(msgType: 99999, raw: ""), "[消息]")
     }
 
+    func testMessageFinalizerCaptureCachesTextAndMediaByServerId() throws {
+        wechat_antirecall_clear_revoke_content_cache()
+        defer { wechat_antirecall_clear_revoke_content_cache() }
+
+        wechat_antirecall_capture_received_content_for_test(1001, 1, "  收到的正文  ")
+        wechat_antirecall_capture_received_content_for_test(1002, 3, "<msg><img aeskey=\"x\" /></msg>")
+
+        XCTAssertEqual(try lookupCachedContent(newMsgId: 1001), "收到的正文")
+        XCTAssertEqual(try lookupCachedContent(newMsgId: 1002), "[图片]")
+    }
+
+    func testMessageFinalizerCaptureUsesActualMsgTypeAndSkipsInvalidIds() throws {
+        wechat_antirecall_clear_revoke_content_cache()
+        defer { wechat_antirecall_clear_revoke_content_cache() }
+
+        wechat_antirecall_capture_received_content_for_test(2001, 34, "serialized voice payload")
+        wechat_antirecall_capture_received_content_for_test(0, 1, "ignored")
+
+        XCTAssertEqual(try lookupCachedContent(newMsgId: 2001), "[语音]")
+        XCTAssertNil(wechat_antirecall_lookup_revoke_content_for_test(0))
+    }
+
     func testReceivedTextPreviewTruncatesOnUTF8Boundary() throws {
         let long = String(repeating: "中", count: 200)  // 600 UTF-8 bytes, over the 240 cap
         let preview = try receivedPreview(msgType: 1, raw: long)
