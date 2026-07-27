@@ -1,279 +1,343 @@
-# wechat-antirecall
+# 微信防撤回 for macOS
 
-macOS 微信 4 的防撤回补丁工具。它只给 `patches.json` 里**已知构建号**打补丁，遇到未知版本会直接拒绝，不会靠猜地址去改二进制。
+一个面向普通用户的 macOS 微信 4 工具：保留被撤回的消息，也支持自定义提示、微信多开、屏蔽自动更新和一键还原。
 
-> ⚠️ 安装会修改 `/Applications/WeChat.app` 里的二进制并重新签名（ad-hoc）。**操作前请完全退出微信**，运行中打补丁可能触发 `Code Signature Invalid` 崩溃。安装时会自动在被修改文件旁生成备份。
+**[下载最新版](https://github.com/fzlzjerry/wechat-antirecall/releases)** · [遇到问题](#遇到问题) · [进阶用法](#进阶用户命令行)
+
+> **使用前先看**
 >
-> 遇到问题：先看 [故障排查](#故障排查) → 搜 issues → 再提 issue（请附上**微信版本号、构建号、系统环境**）。
-
-底层实现、补丁地址、逆向记录、如何新增构建号，都在 [MAINTAINING.md](MAINTAINING.md)。本文只讲怎么用。
+> - 目前仅支持 **Apple Silicon（M 系列）Mac**。
+> - 安装前请先**完全退出微信**。
+> - 工具会修改微信 App，但每次安装都会自动保留备份，可以随时还原。
+> - 如果微信升级后防撤回消失，通常重新检测并安装一次即可。
 
 ---
 
-## 图形界面（GUI，推荐给普通用户）
+## 它能做什么
 
-不想碰终端？用图形界面 App「微信防撤回」——下载即用，点几下就能开启防撤回、自定义提示、多开、一键还原。
+| 你想要的效果 | 对应功能 |
+| --- | --- |
+| 别人撤回后，消息仍留在聊天里 | **静默防撤回** |
+| 显示“谁在什么时候撤回了什么” | **自定义提示** |
+| 避免微信自动升级后覆盖补丁 | **屏蔽自动更新** |
+| 同时登录多个微信账号 | **微信多开** |
+| 回到修改前的原版微信 | **恢复 / 卸载** |
 
-- **获取**：到 [Releases](https://github.com/fzlzjerry/wechat-antirecall/releases) 下载 `.dmg`，拖进「应用程序」。
-- **首次打开**：在「应用程序」里**右键点它 → 打开**（因为未做 Apple 付费公证，直接双击会被 Gatekeeper 拦下）。
-- **保持最新**：App 内「检查更新 → 拉取最新补丁数据」会拉取最新 `patches.json`，新版微信的静默防撤回**即时支持，无需重装 App**。（新版微信的自定义提示需要新的 App 发布或从源码构建。）
-- **仅支持 Apple Silicon（M 系列）Mac。**
+普通用户只需要使用图形界面，不需要打开终端，也不需要理解补丁地址或构建参数。
 
-GUI 是一层薄壳：它内置预编译好的命令行工具，界面上的操作最终都是调用下面的 CLI，只是把「退出微信 / 管理员授权 / 权限引导 / 备份恢复」都做成了图形化流程。想了解它做了什么，看日志区的「查看详情」即可。
+---
 
-**自己构建 GUI**（需要 Xcode 工具链，Apple Silicon）：
+## 3 分钟完成安装
 
-```bash
-bash Scripts/make-icon.sh    # 生成 App 图标（一次即可，已随仓库提供）
-bash Scripts/make-app.sh     # 产出 dist/WeChatAntiRecall.app（ad-hoc 签名）
-open dist/WeChatAntiRecall.app
+### 1. 下载 App
+
+打开 **[Releases](https://github.com/fzlzjerry/wechat-antirecall/releases)**，下载最新的 `.dmg`，然后把「微信防撤回」拖进「应用程序」。
+
+### 2. 第一次打开
+
+在「应用程序」中找到「微信防撤回」，**右键 → 打开 → 再次确认打开**。
+
+如果直接双击后提示无法验证开发者，使用上面的右键打开方式即可。
+
+### 3. 退出微信
+
+安装补丁前，需要完全退出微信：
+
+1. 在 Dock 中右键微信图标。
+2. 选择「退出」。
+3. 确认工具左下角显示 **“微信已退出”**。
+
+### 4. 检测当前版本
+
+打开「微信防撤回」后，首页会自动显示：
+
+- 当前微信版本和构建号；
+- 这个版本是否受支持；
+- 防撤回是否已经开启。
+
+如果显示“暂不支持”，先进入 **「检查更新」→「拉取最新补丁数据」**，然后返回首页重新检测。
+
+### 5. 开启防撤回
+
+在首页点击 **「开启防撤回」**，按提示完成授权。安装成功后重新打开微信。
+
+第一次使用时，建议让另一个账号发一条测试消息再撤回，确认原消息仍然保留。
+
+---
+
+## 我应该选择哪种模式
+
+### 静默防撤回（推荐）
+
+别人撤回消息后，原消息继续保留，不额外显示提示。适合只想安静保留消息的用户。
+
+操作路径：**首页 → 开启防撤回**。
+
+### 自定义撤回提示
+
+可以把微信原来的撤回提示替换成自己的文字，例如：
+
+```text
+已拦截 {from} 于 {time} 撤回：{content}
 ```
 
-发布流程（打 `v*` tag 触发 GitHub Actions 自动构建 DMG）见 [MAINTAINING.md](MAINTAINING.md)。
+支持的占位符：
 
-> 下面是命令行（CLI）用法，供进阶用户和 GUI 背后的机制参考。
+| 占位符 | 显示内容 |
+| --- | --- |
+| `{from}` | 撤回消息的发送者 |
+| `{time}` | 撤回时间，例如 `23:18` |
+| `{content}` | 文字内容，或 `[图片]`、`[视频]`、`[语音]` 等类型提示 |
+
+设置方法：
+
+1. 打开 **「自定义提示」**。
+2. 输入短语并查看预览。
+3. 点击「保存」。
+4. 打开 **「高级安装」**。
+5. 选择「自定义提示」并点击「安装」。
+6. 完全退出并重新打开微信。
+
+> `{content}` 的完整内容预览目前只在构建号 **269340** 上启用，并且只能读取本次微信启动后收到的消息。其他情况会自动省略内容，不会显示多余的冒号或空白。
+
+### 屏蔽自动更新
+
+微信升级通常会覆盖已经安装的补丁。可以在「高级安装」中同时打开 **“屏蔽自动更新”**。
+
+如果你希望继续正常接收微信更新，就不要开启这个选项；微信升级后重新安装防撤回即可。
+
+### 微信多开
+
+打开 **「微信多开」**，选择副本数量后点击「创建多开副本」。工具会在「应用程序」中创建 `WeChat 1`、`WeChat 2` 等独立 App。
+
+- 每个副本通常需要单独登录。
+- 副本默认不会抢占微信网页链接。
+- 多开不会修改原始微信，也不依赖当前微信构建号。
+
+### 恢复 / 卸载
+
+每次安装前，工具都会把原文件保存在微信 App 内部。需要恢复时：
+
+1. 完全退出微信。
+2. 打开 **「恢复 / 卸载」**。
+3. 选择要恢复的时间。
+4. 点击 **「还原这一次」**。
+5. 重新打开微信。
+
+恢复只会还原被修改的微信程序文件，不会删除聊天记录或账号数据。
 
 ---
 
-## 功能一览
+## 检查更新
 
-| 功能 | 说明 | 开关 |
-| --- | --- | --- |
-| **静默防撤回** | 别人撤回的消息原样留在聊天里，不显示任何提示。 | 默认 |
-| **提示模式** | 保留微信原生的"xx 撤回了一条消息"提示，同时不删除原消息。 | `--with-tip`（已弃用） |
-| **自定义撤回提示** | 把**别人**撤回的提示换成你自定义的短语，支持发送者、时间等占位符。 | `--runtime-tip` |
-| **屏蔽自动更新** | 拦住微信自动升级，避免升级把补丁还原。 | `--block-update` / `--update-only` |
-| **多开** | 复制出独立的微信 App，可同时登录多个账号。 | `clone` 命令 |
+「检查更新」页面有两种更新：
+
+### 补丁数据更新
+
+用于支持新的微信构建号。文件很小，拉取后立即生效，不需要重新安装「微信防撤回」App。
+
+适合以下情况：
+
+- 微信刚刚升级；
+- 首页显示“暂不支持”；
+- 安装时提示补丁数据不匹配。
+
+### 应用更新
+
+用于获取新的界面、功能、修复和运行时支持。自定义提示需要适配新版微信时，通常需要更新 App 本身。
+
+普通用户使用发布页面中的最新版即可；「从源码构建」是为开发者准备的功能。
 
 ---
 
-## 快速开始
+## 遇到问题
 
-```bash
-# 1. 退出微信
-pkill -x WeChat
+### 「微信防撤回」打不开
 
-# 2. 确认当前构建号是否被支持
-swift run wechat-antirecall versions --app /Applications/WeChat.app
+在「应用程序」中找到它，使用 **右键 → 打开**，不要直接双击。
 
-# 3. dry-run：只检查补丁点能否命中，不写任何文件
-swift run wechat-antirecall install --dry-run --app /Applications/WeChat.app
+### 没有检测到微信
 
-# 4. 编译 release 并用 sudo 正式安装
-swift build -c release
-sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
+确认微信安装在默认位置：
+
+```text
+/Applications/WeChat.app
 ```
 
-装完请**完全退出并重开微信**。第一次使用建议照 [安装后请验证](#安装后请验证) 做一次实测。
+目前图形界面默认检测这个位置。
 
-> 想要自定义撤回提示，把第 3、4 步的 `install` 换成 `install --runtime-tip`，并先设置好短语（见 [自定义撤回提示](#自定义撤回提示)）。
+### 当前微信版本暂不支持
+
+打开 **「检查更新」→「拉取最新补丁数据」**。更新后仍不支持，说明这个微信构建号还在适配中。
+
+反馈问题时请附上首页显示的：
+
+- 微信版本；
+- 构建号；
+- macOS 版本；
+- 操作日志中最后几行错误。
+
+### 安装时提示没有权限或 `Operation not permitted`
+
+打开：
+
+**系统设置 → 隐私与安全性 → App 管理**
+
+允许「微信防撤回」修改其他 App。如果仍然失败，再到：
+
+**系统设置 → 隐私与安全性 → 完全磁盘访问权限**
+
+添加「微信防撤回」，打开开关后**退出并重新打开工具**再试。
+
+### 安装后微信点了没反应
+
+新版 macOS 可能会阻止重新签名后的微信访问自己的数据目录。处理方法：
+
+1. 打开 **系统设置 → 隐私与安全性 → 完全磁盘访问权限**。
+2. 点击 `+`，添加 `/Applications/WeChat.app`。
+3. 打开微信旁边的开关。
+4. 重新打开微信。
+
+如果列表里已经有微信，先用 `−` 删除，再重新添加。微信升级或重新安装补丁后，偶尔需要再做一次。
+
+### 安装时提示微信仍在运行
+
+先完全退出微信再安装或恢复。不要在微信运行时修改程序文件，否则系统可能直接关闭微信进程。
+
+### 微信升级后防撤回消失
+
+这是正常现象，微信升级会替换已经修改的文件：
+
+1. 打开「微信防撤回」。
+2. 拉取最新补丁数据。
+3. 确认新构建号已受支持。
+4. 退出微信并重新安装。
+
+### 安装成功，但真实撤回没有生效
+
+先确认：
+
+- 微信已经完全退出并重新打开；
+- 测试的是别人撤回的消息；
+- 当前构建号与首页显示一致；
+- 没有在安装后又升级微信。
+
+然后展开底部的「查看详情」，保存最后一段日志并提交 issue。
 
 ---
 
-## 支持的版本
+## 常见问题
 
-工具按**构建号**（`CFBundleVersion`，即 `versions` 打印的那个数字）匹配，不是营销版本号。
+### 会上传聊天内容吗？
 
-| 构建号 | 微信版本 | 静默防撤回 | 提示模式 | 自定义提示 | 屏蔽更新 | 多开补丁 |
+撤回内容匹配在微信进程本地完成，缓存只存在于当前进程。调试探针默认关闭；开启后会把撤回 XML 和相关元数据写入本机 macOS Console。
+
+### 会影响我自己撤回消息吗？
+
+自定义提示只处理别人撤回的消息。你自己撤回时仍使用微信原来的提示。
+
+### 需要关闭 SIP 吗？
+
+不需要。工具只修改「应用程序」中的微信，不修改 macOS 系统文件。
+
+### 支持 Intel Mac 吗？
+
+当前发布的 GUI 只支持 Apple Silicon（M 系列）Mac。
+
+### 如何查看详细操作过程？
+
+点击窗口底部的 **「查看详情」**，可以看到检测、安装、签名和恢复日志。
+
+---
+
+<details>
+<summary><strong>查看当前支持的微信构建号</strong></summary>
+
+工具按微信的内部**构建号**精确匹配。你不需要手动查找，GUI 首页会自动检测。
+
+| 微信版本 | 构建号 | 静默防撤回 | 自定义提示 | `{content}` 内容预览 | 屏蔽自动更新 | 历史多开补丁 |
 | --- | --- | :---: | :---: | :---: | :---: | :---: |
-| 268575 | — | ✓ | ✓ | — | ✓ | ✓ |
-| 268596 | — | ✓ | ✓ | — | ✓ | — |
-| 268597 | — | ✓ | ✓ | ✓ | ✓ | — |
-| 268599 | — | ✓ | ✓ | ✓ | ✓ | — |
-| 268601 | — | ✓ | ✓ | ✓ | ✓ | — |
-| 268602 | — | ✓ | ✓ | ✓ | ✓ | — |
-| 268831 | — | ✓ | ✓ | ✓ | — | — |
-| 268849 | 4.1.10 | ✓ | ✓ | ✓ | ✓ | — |
-| 268850 | 4.1.10 | ✓ | ✓ | ✓ | ✓ | — |
-| 268851 | 4.1.10 | ✓ | ✓ | ✓ | ✓ | — |
-| 269077 | 4.1.11 | ✓ | ✓ | ✓ | ✓ | — |
-| 269110 | 4.1.11 | ✓ | ✓ | ✓ | ✓ | — |
-| 269332 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
-| 269333 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
-| 269334 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
-| 269338 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
-| 269340 | 4.1.12 | ✓ | ✓ | ✓ | ✓ | — |
+| 较早构建 | `268575` | ✅ | — | — | ✅ | ✅ |
+| 较早构建 | `268596` | ✅ | — | — | ✅ | — |
+| 较早构建 | `268597` | ✅ | ✅ | — | ✅ | — |
+| 较早构建 | `268599` | ✅ | ✅ | — | ✅ | — |
+| 较早构建 | `268601` | ✅ | ✅ | — | ✅ | — |
+| 较早构建 | `268602` | ✅ | ✅ | — | ✅ | — |
+| 较早构建 | `268831` | ✅ | ✅ | — | — | — |
+| 4.1.10 | `268849` | ✅ | ✅ | — | ✅ | — |
+| 4.1.10 | `268850` | ✅ | ✅ | — | ✅ | — |
+| 4.1.10 | `268851` | ✅ | ✅ | — | ✅ | — |
+| 4.1.11 | `269077` | ✅ | ✅ | — | ✅ | — |
+| 4.1.11 | `269079` | ✅ | ✅ | — | ✅ | — |
+| 4.1.11 | `269110` | ✅ | ✅ | — | ✅ | — |
+| 4.1.12 | `269332` | ✅ | ✅ | — | ✅ | — |
+| 4.1.12 | `269333` | ✅ | ✅ | — | ✅ | — |
+| 4.1.12 | `269334` | ✅ | ✅ | — | ✅ | — |
+| 4.1.12 | `269338` | ✅ | ✅ | — | ✅ | — |
+| 4.1.12 | `269340` | ✅ | ✅ | ✅ | ✅ | — |
 
-- **自定义提示**（`--runtime-tip`）只支持标 ✓ 的构建号；`268575`、`268596` 不支持，传了会报错。
-- **多开补丁**（`--multi-instance`）目前只有 `268575`。其余版本的多开请用 [`clone`](#多开clone) 命令，它不依赖构建号。
-- 防撤回补丁改的是 `Contents/Resources/wechat.dylib`（不是主二进制）。工具会先单独重签这个 dylib，再重签整个 App。
+说明：
 
-微信 4.1.9 安装包（供回退／测试）：
+- ✅ 表示该构建号支持；`—` 表示暂未支持。
+- `{content}` 内容预览包括文字原文以及 `[图片]`、`[视频]`、`[语音]` 等媒体类型。
+- 表中的“历史多开补丁”是旧式原地多开方式；GUI「微信多开」使用独立副本，**不依赖构建号，所有版本都能使用**。
 
-- [微信 4.1.9.55][wechat-4-1-9-55] · [微信 4.1.9.57][wechat-4-1-9-57]
+</details>
 
-[wechat-4-1-9-55]: https://dldir1v6.qq.com/weixin/Universal/Mac/xWeChatMac_universal_4.1.9.55_38902.dmg
-[wechat-4-1-9-57]: https://dldir1v6.qq.com/weixin/Universal/Mac/xWeChatMac_universal_4.1.9.57_38937.dmg
+<details>
+<summary><strong>进阶用户：命令行</strong></summary>
 
----
+## 进阶用户命令行
 
-## 命令总览
+普通用户不需要执行下面的命令。命令行适合开发、调试或自动化使用。
 
-```
-wechat-antirecall versions    查看当前微信版本、构建号，以及是否被支持
-wechat-antirecall install     打补丁（别名：patch）
-wechat-antirecall clone       复制出独立微信 App，实现多开
-wechat-antirecall restore     从备份恢复
-wechat-antirecall tip-phrase  管理自定义撤回提示短语
-wechat-antirecall help        查看完整参数
-```
-
-### install（打补丁）
+### 构建
 
 ```bash
-sudo .build/release/wechat-antirecall install [参数] --app /Applications/WeChat.app
+swift build -c release
+swift test
 ```
 
-| 参数 | 作用 |
-| --- | --- |
-| `--app <路径>` | 目标 App，默认 `/Applications/WeChat.app` |
-| `--config <路径>` | `patches.json` 路径，默认取当前目录或可执行文件旁 |
-| *(不加 tip 参数)* | 静默防撤回（默认模式） |
-| `--with-tip` | 提示模式（**已弃用**，见下方说明） |
-| `--runtime-tip` | 自定义撤回提示，安装运行时 hook（自动启用提示模式） |
-| `--runtime-dylib <路径>` | 手动指定 runtime dylib（自动启用 `--runtime-tip`） |
-| `--block-update` | 同时屏蔽自动更新 |
-| `--update-only` | 只屏蔽更新，不动防撤回 |
-| `--multi-instance` | 历史多开补丁（仅 `268575`） |
-| `--dry-run` | 只检查补丁点，不写文件 |
-| `--no-backup` | 不创建新备份（覆盖安装 / 切换模式时用） |
-| `--skip-resign` | 跳过重签名（仅测试用） |
+要求 macOS 12+、Swift 5.9+。
 
-常用组合：
+### 查看版本和支持状态
 
 ```bash
-# 静默防撤回
+.build/release/wechat-antirecall versions --app /Applications/WeChat.app
+```
+
+### 只检查，不修改
+
+```bash
+.build/release/wechat-antirecall install --dry-run --app /Applications/WeChat.app
+```
+
+### 安装静默防撤回
+
+```bash
 sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
-
-# 自定义撤回提示 + 屏蔽更新
-sudo .build/release/wechat-antirecall install --runtime-tip --block-update --app /Applications/WeChat.app
-
-# 只屏蔽更新
-sudo .build/release/wechat-antirecall install --update-only --app /Applications/WeChat.app
 ```
 
-参数约束：
-
-- **`--with-tip` 已弃用**：它是纯字节补丁、没有运行时 hook，对**你自己撤回**的消息会留下重复的撤回提示且无法处理。支持的构建号请改用 `--runtime-tip`；`--with-tip` 仅作为不支持 runtime-tip 的旧版本（`268575`、`268596`）的后备，单独使用时会打印弃用提示。
-- `--update-only` 会隐含 `--block-update`，且**不能**与 `--with-tip`、`--runtime-tip`、`--multi-instance` 同用。
-- `--with-tip`（需 `revoke-tip` 目标）、`--block-update`（需 `update` 目标）只在当前构建号于 `patches.json` 里提供对应目标时才生效，否则报错——工具不会静默降级。`--runtime-tip` 则由受支持构建号列表（上一条）把关，不支持的版本直接报错。
-
-### clone（多开）
-
-见下方 [多开（clone）](#多开clone)。
-
-### restore（恢复备份）
-
-见下方 [恢复备份](#恢复备份)。
-
-### tip-phrase（自定义提示短语）
-
-见下方 [自定义撤回提示](#自定义撤回提示)。
-
----
-
-## 自定义撤回提示
-
-自定义提示分两步：**① 设置短语**（写进你自己的微信偏好配置）+ **② 安装运行时 hook**（`install --runtime-tip`）。
-
-**① 设置短语**（用普通用户执行，**不要加 `sudo`**）：
+### 安装自定义提示并屏蔽更新
 
 ```bash
-swift run wechat-antirecall tip-phrase get                                  # 查看当前短语
-swift run wechat-antirecall tip-phrase set "已拦截 {from} 于 {time} 撤回的一条消息"
-swift run wechat-antirecall tip-phrase preview "已拦截 {from} 撤回：{content}" --from 张三                 # 预览（默认当作文本消息）
-swift run wechat-antirecall tip-phrase preview "已拦截 {from} 撤回：{content}" --from 张三 --type 图片      # 预览媒体消息 → {content} 显示 [图片]
-swift run wechat-antirecall tip-phrase reset                                # 恢复默认
+.build/release/wechat-antirecall tip-phrase set "已拦截 {from} 于 {time} 撤回：{content}"
+sudo .build/release/wechat-antirecall install \
+  --runtime-tip \
+  --block-update \
+  --app /Applications/WeChat.app
 ```
 
-`preview` 可选：`--from <发送者>`、`--type <消息类型>`（如 `图片`、`语音`；决定 `{content}` 显示原文还是 `[类型]` 占位符）、`--message <正文>`（自定义示例正文）。
-
-**② 安装运行时 hook**：
+### 创建多开副本
 
 ```bash
-swift build -c release
-sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app
+sudo .build/release/wechat-antirecall clone \
+  --count 2 \
+  --output-dir /Applications \
+  --app /Applications/WeChat.app
 ```
 
-改完短语后请**完全退出并重开微信**——已运行的微信可能还持有旧的偏好缓存。
-
-### 短语规则
-
-- 最长 **120 个字符**，不能包含换行，不能包含 CDATA 结束标记 `]]>`。
-- `{from}` → 发送者的备注或昵称。
-- `{time}` → 撤回时间，格式 `HH:mm`。
-- `{content}` → 被撤回消息的内容（见下方说明）。
-- 未设置时默认显示 `已拦截一条撤回消息`。
-- **你自己撤回**的消息不套用自定义提示，保持微信原生的"你撤回了一条消息"。自定义提示只作用于**别人**的撤回。
-
-### 关于 `{content}`
-
-`{content}` 是一个受支持的占位符：文字消息显示截断后的原文，图片/语音/视频/动画表情/位置/链接等 XML 消息显示 `[图片]`、`[语音]` 等类型占位符。
-
-构建号 **269340** 会通过单独的 Message 接收路径 hook，按 server ID 缓存本次微信进程启动后收到的消息，再在撤回事件中用 `<newmsgid>` 查表。缓存只保留最近最多 512 条；启动前收到、已被淘汰或 ID 缺失的消息会按空处理，并连同 `{content}` 前的分隔符一起省略，不会留下孤零零的"撤回："。其他构建尚未接入接收路径，因此 `{content}` 仍为空。实现和 IDA 证据见 [MAINTAINING.md](MAINTAINING.md)。
-
-### 短语存储位置
-
-```
-~/Library/Containers/com.tencent.xinWeChat/Data/Library/Preferences/com.tencent.xinWeChat.plist
-```
-
-### 调试探针
-
-默认关闭。只有在需要分析撤回 XML 或消息元数据时才打开：
-
-```bash
-swift run wechat-antirecall tip-phrase probe get     # 查看状态
-swift run wechat-antirecall tip-phrase probe on      # 打开
-swift run wechat-antirecall tip-phrase probe off     # 关闭
-```
-
-`probe on` 会把 `newmsgid`、撤回提示和 XML 片段写进 macOS Console。日志可能包含聊天元数据，**收集完请及时关闭**。
-
----
-
-## 多开（clone）
-
-`clone` 不改原始 `/Applications/WeChat.app`，而是复制出独立的 App bundle。它不依赖 `patches.json` 的构建号，任何版本都能用。
-
-```bash
-swift run wechat-antirecall clone --dry-run --app /Applications/WeChat.app --output-dir /Applications
-swift build -c release
-sudo .build/release/wechat-antirecall clone --app /Applications/WeChat.app --output-dir /Applications
-```
-
-默认生成 `WeChat 1.app`、`WeChat 2.app` 两个副本，各自独立的 Bundle ID（`com.tencent.xinWeChat.antirecall.clone1/2`）。每个副本通常要单独登录。
-
-| 参数 | 作用 |
-| --- | --- |
-| `--output-dir <目录>` | 副本输出目录，默认 `/Applications` |
-| `--count <n>` | 副本数量，默认 `2` |
-| `--name-prefix <前缀>` | 副本名前缀，默认 `WeChat` |
-| `--keep-url-schemes` | 保留副本的 URL Scheme。默认会移除副本注册的**全部** URL Scheme（含 `weixin`/`wechat`/`xweixin`），避免系统回调随机落到副本 |
-| `--replace` | 目标已存在时，把旧副本改名为时间戳备份后再创建 |
-| `--skip-resign` | 跳过重签名（仅测试用） |
-
-副本的自定义提示配置只读它自己 Bundle ID 对应的容器 plist，不会回退读原始微信的短语。
-
-> 想用 `--multi-instance` 补丁的历史多开（仅 `268575`），装好后用 `open -n /Applications/WeChat.app` 启动新实例，或用 [WeChatMulti](https://github.com/loohalh/WeChatMulti)。
-
----
-
-## 重装 / 切换模式
-
-已经装过补丁，想从静默切到提示、或重装 runtime，加 `--no-backup` 覆盖当前补丁即可：
-
-```bash
-sudo .build/release/wechat-antirecall install --runtime-tip --app /Applications/WeChat.app --no-backup
-```
-
-`--no-backup` 只是不再创建**新**备份，不会绕过权限、签名或 App Management 限制。
-
----
-
-## 恢复备份
-
-安装时会在被改文件旁生成备份，命名如 `wechat.dylib.wechat-antirecall-backup-20260505-143000`。恢复前**先退出微信**：
+### 从备份恢复
 
 ```bash
 sudo .build/release/wechat-antirecall restore \
@@ -282,91 +346,35 @@ sudo .build/release/wechat-antirecall restore \
   --app /Applications/WeChat.app
 ```
 
-- 恢复 `wechat.dylib` 备份后，注入的 runtime load command 会随之消失，`libWeChatAntiRecallRuntime.dylib` 即使还在目录里也不会再被加载。
-- 如果装过 `--multi-instance`（会改主二进制），把 `--binary` 换成 `Contents/MacOS/WeChat`、`--backup` 换成对应备份即可。
-- restore 默认会重签名，加 `--skip-resign` 可跳过（仅测试用）。
-
----
-
-## 验证签名
+完整参数：
 
 ```bash
-# 常规防撤回 / 屏蔽更新
-codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/Resources/wechat.dylib
-codesign --verify --deep --strict --verbose=2 /Applications/WeChat.app
-
-# 装过 --runtime-tip 时，额外检查 runtime dylib
-codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/Resources/libWeChatAntiRecallRuntime.dylib
-
-# 装过 --multi-instance 时，额外检查主二进制
-codesign --verify --strict --verbose=2 /Applications/WeChat.app/Contents/MacOS/WeChat
+.build/release/wechat-antirecall help
 ```
 
----
+</details>
 
-## 安装后请验证
-
-`--dry-run`、`swift build`、`swift test` 只能证明**补丁点原始字节匹配、代码能编译**——它们**无法**证明 hook 在真实撤回时确实生效，也无法证明屏蔽更新真的拦住了升级。这些运行时行为尚未在全部构建号上做过回归。
-
-所以第一次在某个构建号上使用时，请手动确认：
-
-- **防撤回 / 自定义提示**：用另一台设备或账号发一条消息再撤回，看原消息是否留存、提示是否符合预期。
-- **屏蔽更新**：手动点微信"检查更新"，若不再有反应，说明补丁生效。（一旦更新漏过并自动升级，包括防撤回在内的所有补丁都会被还原。）
-
----
-
-## 故障排查
-
-### 安装
-
-**权限不足** —— 看到类似
-`"wechat.dylib" couldn't be copied because you don't have permission…`：
-不要用 `swift run … install` 直接装。先编译 release，再用 `sudo` 跑：
+<details>
+<summary><strong>开发者：从源码构建图形界面</strong></summary>
 
 ```bash
-swift build -c release
-sudo .build/release/wechat-antirecall install --app /Applications/WeChat.app
+bash Scripts/make-icon.sh
+bash Scripts/make-app.sh
+open dist/WeChatAntiRecall.app
 ```
 
-若 `sudo` 下 `touch` 目标目录仍报 `Operation not permitted`，通常是 macOS 隐私拦截。到 **系统设置 → 隐私与安全性 → App 管理**（必要时再加 **完全磁盘访问权限**），给你用的终端（Terminal / iTerm / VS Code / Cursor 等）授权，退出重开终端再试。
+底层实现、补丁配置、逆向记录、新构建适配方法和发布流程见 **[MAINTAINING.md](MAINTAINING.md)**。
 
-**微信仍在运行** —— 提示 `WeChat 仍在运行` 时，先完全退出微信再安装或恢复。这是为了避免旧进程执行到被改代码页时被系统以 `Code Signature Invalid` 杀掉。
-
-**找不到 runtime dylib** —— `--runtime-tip` 报找不到 `libWeChatAntiRecallRuntime.dylib`，先 `swift build -c release`；也可以用 `--runtime-dylib .build/release/libWeChatAntiRecallRuntime.dylib` 显式指定。
-
-### 使用
-
-**打开微信频繁弹权限申请窗** —— 到 **系统设置 → 隐私与安全性 → 完全磁盘访问权限**（或反复弹窗的对应权限）：选中`微信`，点底部 `−` 删除，再点 `+` 重新添加，弹出提示时选 `退出并重新打开` 生效。
-
-**升级到 macOS 26 / 27 后，补丁版微信打不开**（点了没反应 / 图标弹一下就退）—— 给 `微信` 单独授予**完全磁盘访问权限**：
-系统设置 → 隐私与安全性 → 完全磁盘访问权限 → `+` 选择 `/Applications/WeChat.app` → 打开开关 → 再开微信。
-
-> 原因：打补丁会用 ad-hoc 签名重签微信，抹掉了原本的签名身份和 entitlements。微信把数据存在 `~/Documents/app_data`，而 `Documents` 是 macOS 的 TCC 保护目录；新版 macOS 会拒绝这个"没身份、没授权"的微信访问该目录，于是启动即退。授予完全磁盘访问权限后即可正常启动。
->
-> 补丁每次重签后 cdhash 会变，所以**重新打补丁、或微信自身升级后，可能要把列表里旧的`微信`删掉重新添加一次**。自检：若终端直接跑 `/Applications/WeChat.app/Contents/MacOS/WeChat` 能起来、但双击 / Dock 起不来，基本就是这个权限问题。
+</details>
 
 ---
 
-## 从源码构建
+## 相关项目
 
-```bash
-swift build -c release      # 产出 .build/release/wechat-antirecall 和 runtime dylib
-swift test                  # 运行单元测试
-```
-
-要求 macOS 12+ 和 Swift 5.9+。
-
-## 维护者文档
-
-补丁地址、`patches.json` 结构、运行时 hook 的两种机制（派发桩 vs 内联）、屏蔽更新补丁点的逆向来源、逐字节核对记录、`{content}` 实现、以及**如何新增一个构建号**，都在 → **[MAINTAINING.md](MAINTAINING.md)**。
-
-## 参考
-
-- [sunnyyoung/WeChatTweak-macOS](https://github.com/sunnyyoung/WeChatTweak-macOS) —— upstream，含 `Block message recall`
-- [tanranv5/WeChatTweak](https://github.com/tanranv5/WeChatTweak) —— 社区 fork，补充 x86_64 配置，引入 `binary` 字段
-- [zetaloop/BetterWX](https://github.com/zetaloop/BetterWX) —— Windows 版微信 4 的同类提示模式补丁
-- [X1a0He/X1a0HeWeChatPlugin](https://github.com/X1a0He/X1a0HeWeChatPlugin) —— 自定义撤回提示短语功能参考
-- [naizhao/WeChatTweak](https://github.com/naizhao/WeChatTweak/blob/master/MAINTAINING.md) —— 社区 fork 维护指南
+- [sunnyyoung/WeChatTweak-macOS](https://github.com/sunnyyoung/WeChatTweak-macOS)
+- [tanranv5/WeChatTweak](https://github.com/tanranv5/WeChatTweak)
+- [zetaloop/BetterWX](https://github.com/zetaloop/BetterWX)
+- [X1a0He/X1a0HeWeChatPlugin](https://github.com/X1a0He/X1a0HeWeChatPlugin)
 
 ## 友链
 
