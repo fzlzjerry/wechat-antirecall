@@ -360,6 +360,40 @@ final class PatchConfigTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269340"))
     }
 
+    func testBuild269341SupportsInlineHookRecallPatchesAndUpdateBlock() throws {
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "269341" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip", "update", "runtime-tip"])
+        // 269341 is a slice-wide rebuild of 269340: parseRevokeXML moved from 0x462e200 to
+        // 0x462e60c (located by a masked-shape diff against the 269340 reference dylib), so the
+        // revoke/revoke-tip points shift but the field offsets (0x198/0x1A0) and the cbz/b patch
+        // bytes are unchanged.
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke" }?.entries.first?.address, 0x462e87c)
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke-tip" }?.entries.map(\.address), [0x462e87c, 0x462f01c])
+
+        // The XAppUpdateManager code region was NOT relocated by the rebuild, so all eight
+        // update-blocking sites keep the exact same addresses and bytes as 269340.
+        let update = try XCTUnwrap(config.targets.first { $0.identifier == "update" })
+        XCTAssertEqual(update.entries.map(\.address), [
+            0x26e4c0, 0x2706ec, 0x2709bc, 0x270ddc,
+            0x27b1d0, 0x27b1d8, 0x27b1e0, 0x27b1e8
+        ])
+        XCTAssertTrue(update.entries.allSatisfy { $0.patchBytes.suffix(4) == (try! Data(hexString: "C0035FD6")) })
+
+        // parseRevokeXML and the Message finalizer both stayed on their 269340 4KB pages, so the
+        // static adrp/ldr/br stubs are byte-identical and resolve to the same SLOTs (0x9a9ff00 /
+        // 0x9a9ff08), but their entry addresses moved to 0x462e60c / 0x45ce5b0.
+        let runtimeTip = try XCTUnwrap(config.targets.first { $0.identifier == "runtime-tip" })
+        XCTAssertEqual(runtimeTip.entries[0].address, 0x462e60c)
+        XCTAssertEqual(runtimeTip.entries[0].expectedBytes, [try Data(hexString: "F85FBCA9F65701A9F44F02A9")])
+        XCTAssertEqual(runtimeTip.entries[0].patchBytes, try Data(hexString: "90A302B0108247F900021FD6"))
+        XCTAssertEqual(runtimeTip.entries[1].address, 0x45ce5b0)
+        XCTAssertEqual(runtimeTip.entries[1].expectedBytes, [try Data(hexString: "084049391F0500712008407A")])
+        XCTAssertEqual(runtimeTip.entries[1].patchBytes, try Data(hexString: "90A602B0108647F900021FD6"))
+        XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269341"))
+    }
+
     private func loadPatchConfigs() throws -> [VersionConfig] {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("patches.json")

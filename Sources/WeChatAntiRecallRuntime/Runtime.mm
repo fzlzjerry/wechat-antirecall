@@ -168,6 +168,17 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // unique (entry+0x270 guard, entry+0xA10 newmsgid store), with output fields
     // newMsgId=0x198 and replaceMsg=0x1A0. The entry stub uses SLOT 0x9a9ff00.
     {"269340", 0x462e200, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462e20c, 0x198, 0x1a0},
+    // 269341 (WeChat 4.1.12 hotfix): the whole arm64 slice was rebuilt, so __TEXT and the patch
+    // sites all moved — but __DATA's layout (segment vmaddr/vmsize, __common end 0x9a9ea68,
+    // __DATA end 0x9aa0000) is byte-identical to 269340. parseRevokeXML was relocated by a
+    // masked-instruction-shape diff against the 269340 reference dylib (full-body match 95.88%;
+    // the only deltas are vector ldr spills whose adrp page shifted +0x1000): it moved from
+    // 0x462e200 to 0x462e60c, retaining the same prologue, the cbz w0,+0x208 guard at entry+0x270
+    // (0x462e87c), the single str x0,[x19,#0x198] newmsgid store at entry+0xA10 (0x462f01c), and
+    // the four ldr x0,[x19,#0x1A0] replaceMsg loads — so the message fields stay 0x198/0x1A0.
+    // Because the entry stayed on the same 4KB page as 269340's, the static runtime-tip stub
+    // (adrp/ldr/br) is byte-identical and still resolves to SLOT 0x9a9ff00.
+    {"269341", 0x462e60c, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462e618, 0x198, 0x1a0},
 };
 
 constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
@@ -182,6 +193,22 @@ constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
         0x45ce1a4,
         {0x39494008, 0x7100051F, 0x7A400820},
         0x45ce1b0,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 269341 (WeChat 4.1.12 hotfix): sub_45CE1A4 was relocated to 0x45ce5b0 by the slice rebuild
+    // (full-body masked-shape match against the 269340 reference is 100% — the first three
+    // instructions ldrb w8,[x0,#0x14a]/cmp/ccmp are unchanged, and the continuation is again at
+    // entry+0xc). The Message constructor still populates serverId (+0xF8), msgType (+0x0C) and
+    // content (+0x130) before calling this finalizer, so the capture field offsets are unchanged.
+    // The entry stayed on the same 4KB page as 269340's, so the runtime-tip stub is byte-identical
+    // and still resolves to SLOT 0x9a9ff08 (next qword after the revoke hook's 0x9a9ff00).
+    {
+        "269341",
+        0x45ce5b0,
+        {0x39494008, 0x7100051F, 0x7A400820},
+        0x45ce5bc,
         0x0f8,
         0x00c,
         0x130,

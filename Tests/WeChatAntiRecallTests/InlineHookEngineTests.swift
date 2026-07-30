@@ -69,6 +69,25 @@ final class InlineHookEngineTests: XCTestCase {
         XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x45ce1a4), 0x9a9ff08)
     }
 
+    // 269341 relocated parseRevokeXML (0x462e200 -> 0x462e60c) and the Message finalizer
+    // (0x45ce1a4 -> 0x45ce5b0) within their 269340 4KB pages, so the stub bytes are
+    // byte-identical to 269340 but must re-encode from the new entry addresses.
+    func testEncoderMatchesRecorded269341StaticPatch() throws {
+        var bytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x462e60c, 0x9a9ff00, &bytes), 1)
+        let hex = bytes.map { String(format: "%02X", $0) }.joined()
+        XCTAssertEqual(hex, "90A302B0108247F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x462e60c), 0x9a9ff00)
+    }
+
+    func testEncoderMatchesRecorded269341MessageCapturePatch() throws {
+        var bytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x45ce5b0, 0x9a9ff08, &bytes), 1)
+        let hex = bytes.map { String(format: "%02X", $0) }.joined()
+        XCTAssertEqual(hex, "90A602B0108647F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x45ce5b0), 0x9a9ff08)
+    }
+
     /// Non-stub bytes must not decode as a slot (guards against false positives that
     /// would make the runtime treat an unpatched entry as installed).
     func testDecodeRejectsNonStubBytes() throws {
