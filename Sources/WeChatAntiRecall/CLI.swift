@@ -23,6 +23,7 @@ enum ToolError: LocalizedError {
     case bytesMismatch(address: UInt64, expected: [Data], actual: Data)
     case noMatchingSlice(String)
     case commandFailed(String, Int32)
+    case signingEntitlementsMismatch([String])
     case permissionDenied(path: String, operation: String)
     case fileOperationFailed(operation: String, path: String, underlying: String)
     case appIsRunning(path: String, pids: [String])
@@ -52,6 +53,12 @@ enum ToolError: LocalizedError {
             return "\(path) 中没有找到配置要求的架构切片"
         case .commandFailed(let command, let status):
             return "\(command) 执行失败，退出码 \(status)"
+        case .signingEntitlementsMismatch(let paths):
+            return """
+            重签名后有 \(paths.count) 个代码对象的 entitlements 与安装前不一致：
+            \(paths.joined(separator: "\n"))
+            已停止安装结果验证，避免以缺少麦克风、摄像头、网络或扩展权限的签名继续运行。
+            """
         case .permissionDenied(let path, let operation):
             return """
             没有权限\(operation)：\(path)
@@ -1759,13 +1766,101 @@ private func makeBackup(of fileURL: URL) throws -> URL {
     return backupURL
 }
 
-func resign(appURL: URL, nestedBinaries: [URL]) throws {
-    for binaryURL in uniqueURLs(nestedBinaries) {
-        try signMachO(at: binaryURL)
+struct CodeSigningEntitlementsSnapshot {
+    struct Entry {
+        let url: URL
+        let plistData: Data?
     }
 
-    try runProcess("/usr/bin/codesign", ["--remove-sign", appURL.path])
-    try runProcess("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", appURL.path])
+    let entries: [Entry]
+
+    static let empty = CodeSigningEntitlementsSnapshot(entries: [])
+
+    static func capture(in appURL: URL) throws -> CodeSigningEntitlementsSnapshot {
+        var entries: [Entry] = []
+        for candidate in codeSigningCandidates(in: appURL) {
+            if let signedCode = try inspectSignedCode(at: candidate) {
+                entries.append(Entry(url: candidate, plistData: signedCode.entitlements))
+            }
+        }
+        return CodeSigningEntitlementsSnapshot(entries: entries)
+    }
+
+    func plistData(for url: URL) -> Data? {
+        let path = url.standardizedFileURL.path
+        return entries.first { $0.url.standardizedFileURL.path == path }?.plistData
+    }
+
+    func mismatchingPaths() throws -> [String] {
+        var mismatches: [String] = []
+        for entry in entries {
+            guard let inspected = try inspectSignedCode(at: entry.url) else {
+                mismatches.append(entry.url.path)
+                continue
+            }
+
+            switch (entry.plistData, inspected.entitlements) {
+            case (nil, nil):
+                break
+            case let (expected?, current?) where entitlementPlistsAreEqual(expected, current):
+                break
+            default:
+                mismatches.append(entry.url.path)
+            }
+        }
+        return mismatches.sorted()
+    }
+}
+
+func resign(
+    appURL: URL,
+    nestedBinaries: [URL],
+    preserveEntitlements: Bool = true
+) throws {
+    // Snapshot every signed code object and its optional entitlement profile before touching
+    // any signature. In particular, patchedBinaries normally contains Contents/MacOS/WeChat.
+    // Removing that signature first used to erase the app's microphone/camera/network/sandbox
+    // profile before the final --deep signing pass had a chance to preserve it.
+    let entitlementSnapshot = preserveEntitlements
+        ? try CodeSigningEntitlementsSnapshot.capture(in: appURL)
+        : .empty
+
+    for binaryURL in uniqueURLs(nestedBinaries) {
+        try signMachO(
+            at: binaryURL,
+            entitlements: entitlementSnapshot.plistData(for: binaryURL),
+            preserveMetadata: preserveEntitlements
+        )
+    }
+
+    try signAppBundle(
+        at: appURL,
+        // Supplying the root plist together with --deep also applies it to nested code
+        // objects that originally had no entitlements. First create a clean ad-hoc signing
+        // tree, then restore only the saved profiles below.
+        entitlements: nil,
+        preserveMetadata: preserveEntitlements
+    )
+
+    if preserveEntitlements {
+        var mismatches = try entitlementSnapshot.mismatchingPaths()
+        if !mismatches.isEmpty {
+            // --preserve-metadata is the fast path. If a macOS/codesign version drops one of
+            // the nested profiles, explicitly restore each saved plist from the deepest code
+            // object outward and seal the root app last.
+            try restoreCapturedEntitlements(entitlementSnapshot, appURL: appURL)
+            mismatches = try entitlementSnapshot.mismatchingPaths()
+            guard mismatches.isEmpty else {
+                throw ToolError.signingEntitlementsMismatch(mismatches)
+            }
+        }
+    }
+
+    try runProcess(
+        "/usr/bin/codesign",
+        ["--verify", "--deep", "--strict", "--verbose=2", appURL.path]
+    )
+
     // Best-effort quarantine strip so the re-signed app still launches. The bundle is already
     // validly signed above, so this must not fail the install: on macOS 15+ many files carry an
     // OS-protected `com.apple.provenance` xattr that xattr(1) cannot remove even as the owner
@@ -1773,16 +1868,32 @@ func resign(appURL: URL, nestedBinaries: [URL]) throws {
     _ = runProcessStatus("/usr/bin/xattr", ["-cr", appURL.path])
 }
 
-private func signMachO(at url: URL) throws {
-    _ = runProcessStatus("/usr/bin/codesign", ["--remove-sign", url.path])
-    if runProcessStatus("/usr/bin/codesign", ["--force", "--sign", "-", url.path]) == 0 {
+private func signMachO(
+    at url: URL,
+    entitlements: Data?,
+    preserveMetadata: Bool
+) throws {
+    if runCodesignStatus(
+        url: url,
+        deep: false,
+        entitlements: entitlements,
+        preserveMetadata: preserveMetadata
+    ) == 0 {
         return
     }
 
-    try signMachOUsingTemporaryCopy(at: url)
+    try signMachOUsingTemporaryCopy(
+        at: url,
+        entitlements: entitlements,
+        preserveMetadata: preserveMetadata
+    )
 }
 
-private func signMachOUsingTemporaryCopy(at url: URL) throws {
+private func signMachOUsingTemporaryCopy(
+    at url: URL,
+    entitlements: Data?,
+    preserveMetadata: Bool
+) throws {
     let temporaryDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("wechat-antirecall-sign-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
@@ -1792,9 +1903,257 @@ private func signMachOUsingTemporaryCopy(at url: URL) throws {
 
     let temporaryURL = temporaryDirectory.appendingPathComponent(url.lastPathComponent)
     try FileManager.default.copyItem(at: url, to: temporaryURL)
-    _ = runProcessStatus("/usr/bin/codesign", ["--remove-sign", temporaryURL.path])
-    try runProcess("/usr/bin/codesign", ["--force", "--sign", "-", temporaryURL.path])
+    try runCodesign(
+        url: temporaryURL,
+        deep: false,
+        entitlements: entitlements,
+        preserveMetadata: preserveMetadata
+    )
     try runProcess("/bin/cp", ["-p", temporaryURL.path, url.path])
+}
+
+private func signAppBundle(
+    at appURL: URL,
+    entitlements: Data?,
+    preserveMetadata: Bool
+) throws {
+    try runCodesign(
+        url: appURL,
+        deep: true,
+        entitlements: entitlements,
+        preserveMetadata: preserveMetadata
+    )
+}
+
+private func restoreCapturedEntitlements(
+    _ snapshot: CodeSigningEntitlementsSnapshot,
+    appURL: URL
+) throws {
+    let appPath = appURL.standardizedFileURL.path
+    let entitlementPaths = snapshot.entries.compactMap { entry -> String? in
+        guard entry.plistData != nil else {
+            return nil
+        }
+        return entry.url.standardizedFileURL.path
+    }
+    let entriesToRestore = snapshot.entries.filter { entry in
+        let path = entry.url.standardizedFileURL.path
+        let prefix = path.hasSuffix("/") ? path : "\(path)/"
+        return entry.plistData != nil || entitlementPaths.contains { $0.hasPrefix(prefix) }
+    }
+    let deepestFirst = entriesToRestore.sorted {
+        let lhsDepth = $0.url.standardizedFileURL.pathComponents.count
+        let rhsDepth = $1.url.standardizedFileURL.pathComponents.count
+        if lhsDepth == rhsDepth {
+            return $0.url.path > $1.url.path
+        }
+        return lhsDepth > rhsDepth
+    }
+
+    for entry in deepestFirst {
+        guard entry.url.standardizedFileURL.path != appPath else {
+            continue
+        }
+        try runCodesign(
+            url: entry.url,
+            deep: false,
+            entitlements: entry.plistData,
+            preserveMetadata: true
+        )
+    }
+
+    // The initial recursive pass has already converted the Developer-ID nested requirements
+    // to ad-hoc requirements. Seal the root without --deep so codesign cannot rewrite the
+    // entitlement profiles that were just restored on the children.
+    try runCodesign(
+        url: appURL,
+        deep: false,
+        entitlements: snapshot.plistData(for: appURL),
+        preserveMetadata: true
+    )
+}
+
+private func runCodesign(
+    url: URL,
+    deep: Bool,
+    entitlements: Data?,
+    preserveMetadata: Bool
+) throws {
+    try withTemporaryEntitlementsFile(entitlements) { entitlementsURL in
+        try runProcess(
+            "/usr/bin/codesign",
+            codesignArguments(
+                url: url,
+                deep: deep,
+                entitlementsURL: entitlementsURL,
+                preserveMetadata: preserveMetadata
+            )
+        )
+    }
+}
+
+private func runCodesignStatus(
+    url: URL,
+    deep: Bool,
+    entitlements: Data?,
+    preserveMetadata: Bool
+) -> Int32 {
+    do {
+        return try withTemporaryEntitlementsFile(entitlements) { entitlementsURL in
+            runProcessStatus(
+                "/usr/bin/codesign",
+                codesignArguments(
+                    url: url,
+                    deep: deep,
+                    entitlementsURL: entitlementsURL,
+                    preserveMetadata: preserveMetadata
+                )
+            )
+        }
+    } catch {
+        return 127
+    }
+}
+
+private func codesignArguments(
+    url: URL,
+    deep: Bool,
+    entitlementsURL: URL?,
+    preserveMetadata: Bool
+) -> [String] {
+    var arguments = ["--force"]
+    if deep {
+        arguments.append("--deep")
+    }
+    if preserveMetadata {
+        arguments.append(
+            // Requirements bind the original Developer ID identity. Preserving them while
+            // changing to an ad-hoc identity leaves nested code valid in isolation but
+            // unacceptable to its parent resource envelope.
+            "--preserve-metadata=identifier,flags,runtime"
+        )
+    }
+    arguments.append(contentsOf: ["--sign", "-"])
+    if let entitlementsURL {
+        if ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 15, minorVersion: 0, patchVersion: 0)
+        ) {
+            // macOS 15+ no longer embeds supplied entitlements in libraries by default.
+            arguments.append("--force-library-entitlements")
+        }
+        arguments.append(contentsOf: ["--entitlements", entitlementsURL.path])
+    }
+    arguments.append(url.path)
+    return arguments
+}
+
+private func withTemporaryEntitlementsFile<T>(
+    _ plistData: Data?,
+    body: (URL?) throws -> T
+) throws -> T {
+    guard let plistData else {
+        return try body(nil)
+    }
+
+    let temporaryDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("wechat-antirecall-entitlements-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+    defer {
+        try? FileManager.default.removeItem(at: temporaryDirectory)
+    }
+
+    let plistURL = temporaryDirectory.appendingPathComponent("entitlements.plist")
+    try plistData.write(to: plistURL, options: .atomic)
+    return try body(plistURL)
+}
+
+private func codeSigningCandidates(in appURL: URL) -> [URL] {
+    let codeBundleExtensions: Set<String> = [
+        "app", "appex", "bundle", "framework", "plugin", "service", "xpc"
+    ]
+    let looseCodeExtensions: Set<String> = ["dylib", "so"]
+    let resourceKeys: [URLResourceKey] = [
+        .isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey
+    ]
+
+    var candidates = [appURL]
+    if let enumerator = FileManager.default.enumerator(
+        at: appURL,
+        includingPropertiesForKeys: resourceKeys,
+        options: [],
+        errorHandler: { _, _ in true }
+    ) {
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: Set(resourceKeys)),
+                  values.isSymbolicLink != true else {
+                continue
+            }
+
+            if values.isDirectory == true,
+               codeBundleExtensions.contains(url.pathExtension.lowercased()) {
+                candidates.append(url)
+            } else if values.isRegularFile == true,
+                      FileManager.default.isExecutableFile(atPath: url.path)
+                        || looseCodeExtensions.contains(url.pathExtension.lowercased()) {
+                candidates.append(url)
+            }
+        }
+    }
+
+    return uniqueURLs(candidates)
+}
+
+private struct InspectedSignedCode {
+    let entitlements: Data?
+}
+
+private func inspectSignedCode(at url: URL) throws -> InspectedSignedCode? {
+    let result = try runProcessCapture(
+        "/usr/bin/codesign",
+        ["-d", "--entitlements", "-", "--xml", url.path]
+    )
+    guard result.status == 0 else {
+        return nil
+    }
+    guard !result.stdout.isEmpty else {
+        return InspectedSignedCode(entitlements: nil)
+    }
+
+    var format = PropertyListSerialization.PropertyListFormat.xml
+    guard let dictionary = try PropertyListSerialization.propertyList(
+        from: result.stdout,
+        options: [],
+        format: &format
+    ) as? [String: Any],
+          !dictionary.isEmpty else {
+        return InspectedSignedCode(entitlements: nil)
+    }
+
+    let plistData = try PropertyListSerialization.data(
+        fromPropertyList: dictionary,
+        format: .xml,
+        options: 0
+    )
+    return InspectedSignedCode(entitlements: plistData)
+}
+
+private func entitlementPlistsAreEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+    guard let lhsDictionary = try? PropertyListSerialization.propertyList(
+        from: lhs,
+        options: [],
+        format: nil
+    ) as? [String: Any],
+          let rhsDictionary = try? PropertyListSerialization.propertyList(
+              from: rhs,
+              options: [],
+              format: nil
+          ) as? [String: Any] else {
+        return false
+    }
+
+    return NSDictionary(dictionary: lhsDictionary).isEqual(
+        to: rhsDictionary
+    )
 }
 
 private func uniqueURLs(_ urls: [URL]) -> [URL] {
@@ -1820,6 +2179,23 @@ private func runProcess(_ executable: String, _ arguments: [String]) throws {
     if process.terminationStatus != 0 {
         throw ToolError.commandFailed(([executable] + arguments).joined(separator: " "), process.terminationStatus)
     }
+}
+
+private func runProcessCapture(
+    _ executable: String,
+    _ arguments: [String]
+) throws -> (status: Int32, stdout: Data) {
+    let process = Process()
+    let outputPipe = Pipe()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    process.standardOutput = outputPipe
+    process.standardError = FileHandle.nullDevice
+
+    try process.run()
+    let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return (process.terminationStatus, output)
 }
 
 private func runProcessStatus(_ executable: String, _ arguments: [String]) -> Int32 {

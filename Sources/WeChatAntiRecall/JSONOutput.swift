@@ -250,6 +250,9 @@ struct ErrorDTO: Encodable {
             self.path = path
         case .commandFailed:
             kind = "commandFailed"
+        case .signingEntitlementsMismatch(let paths):
+            kind = "signingEntitlementsMismatch"
+            self.path = paths.first
         case .permissionDenied(let path, _):
             kind = "permissionDenied"
             self.path = path

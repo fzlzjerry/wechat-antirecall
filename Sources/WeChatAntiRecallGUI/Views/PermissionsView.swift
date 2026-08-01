@@ -17,7 +17,7 @@ struct PermissionsView: View {
             permissionCard(
                 icon: "externaldrive.badge.person.crop",
                 title: "完全磁盘访问",
-                body: "打补丁会用 ad-hoc 重新签名微信，抹掉原有签名身份。新版 macOS（26/27）可能因此拒绝微信访问它的数据目录，导致打补丁后微信打不开。给微信本身授予「完全磁盘访问」即可解决。\n注意：每次重新打补丁或微信升级后，签名会变，可能需要在列表里删掉旧的微信重新添加。",
+                body: "安装会自动保留并校验微信主程序、Helper 和扩展的麦克风、摄像头、网络与沙盒 entitlements；但 ad-hoc 重签名仍会改变原厂签名身份。新版 macOS（26/27）可能因此拒绝微信访问它的数据目录，导致打补丁后微信打不开。给微信本身授予「完全磁盘访问」即可解决。\n注意：每次重新打补丁或微信升级后，签名会变，可能需要在列表里删掉旧的微信重新添加。",
                 buttonTitle: "打开完全磁盘访问设置",
                 url: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
             )

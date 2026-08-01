@@ -178,7 +178,14 @@ struct WeChatCloneInstaller {
             try fileManager.copyItem(at: spec.sourceURL, to: temporaryURL)
             try rewriteInfoPlist(in: temporaryURL, spec: spec, keepURLSchemes: keepURLSchemes)
             if !skipResign {
-                try resign(appURL: temporaryURL, nestedBinaries: [])
+                // A clone deliberately changes the root bundle identifier, so it must not
+                // inherit the source app's team-bound application-identifier/app-group
+                // entitlements. Normal install/restore calls keep the default preservation.
+                try resign(
+                    appURL: temporaryURL,
+                    nestedBinaries: [],
+                    preserveEntitlements: false
+                )
             }
 
             if fileManager.fileExists(atPath: destinationURL.path) {

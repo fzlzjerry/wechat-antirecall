@@ -106,6 +106,17 @@ final class JSONOutputTests: XCTestCase {
         XCTAssertEqual(dto.path, "/nope/WeChat.app")
     }
 
+    func testErrorDTOMapsSigningEntitlementsMismatch() {
+        let paths = [
+            "/Applications/WeChat.app",
+            "/Applications/WeChat.app/Contents/PlugIns/Share.appex"
+        ]
+        let dto = ErrorDTO(ToolError.signingEntitlementsMismatch(paths))
+
+        XCTAssertEqual(dto.kind, "signingEntitlementsMismatch")
+        XCTAssertEqual(dto.path, paths[0])
+    }
+
     func testErrorEnvelopeEncodesSchemaVersion() throws {
         let envelope = ErrorEnvelope(ToolError.usage("bad"))
         let data = try JSONOutput.encoder.encode(envelope)
