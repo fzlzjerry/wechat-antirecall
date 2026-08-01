@@ -3,9 +3,10 @@ import SwiftUI
 struct AdvancedInstallView: View {
     @EnvironmentObject var state: AppState
 
-    @State private var mode: InstallMode = .silent
-    @State private var blockUpdate = false
-    @State private var multiInstance = false
+    @Binding var mode: InstallMode
+    @Binding var blockUpdate: Bool
+    @Binding var multiInstance: Bool
+    var goToRestore: () -> Void
 
     private var request: InstallRequest {
         InstallRequest(mode: mode, blockUpdate: blockUpdate, multiInstance: multiInstance)
@@ -13,6 +14,8 @@ struct AdvancedInstallView: View {
 
     private var features: VersionsReport.Features? { state.versions?.features }
     private var supported: Bool { if case .supported = state.supportStatus { return true } else { return false } }
+    private var modeAvailable: Bool { mode != .customTip || state.runtimeTipSupported }
+    private var requiresRestore: Bool { state.installedMode == .customTip && mode == .silent }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.gap) {
@@ -49,7 +52,12 @@ struct AdvancedInstallView: View {
                             Image(systemName: mode == m ? "largecircle.fill.circle" : "circle")
                                 .foregroundStyle(mode == m ? Theme.accent : .secondary)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(m.title).foregroundStyle(disabled ? .secondary : .primary)
+                                HStack(spacing: 7) {
+                                    Text(m.title).foregroundStyle(disabled ? .secondary : .primary)
+                                    if state.installedMode == m {
+                                        StatusPill(tone: .good, text: "当前模式", systemImage: "checkmark.circle.fill")
+                                    }
+                                }
                                 Text(disabled ? "当前版本不支持自定义提示（需要新的应用更新，不是拉数据能解决）" : m.subtitle)
                                     .font(.caption).foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -62,7 +70,7 @@ struct AdvancedInstallView: View {
                 }
                 if mode == .customTip {
                     HintRow(systemImage: "text.bubble",
-                            text: "自定义短语在「自定义提示」页设置；这里负责安装运行时 hook。")
+                            text: "自定义短语可在「自定义提示」页直接保存并安装；这里用于组合更多高级选项。")
                 }
             }
         }
@@ -98,6 +106,16 @@ struct AdvancedInstallView: View {
     private var actionCard: some View {
         Card {
             VStack(alignment: .leading, spacing: 12) {
+                if requiresRestore {
+                    HStack(alignment: .top) {
+                        HintRow(
+                            systemImage: "arrow.uturn.backward.circle.fill",
+                            text: "从「自定义提示」切回「静默防撤回」前，需先还原备份，避免留下运行时 hook。",
+                            tint: .orange)
+                        Button("前往恢复") { goToRestore() }
+                            .buttonStyle(.bordered)
+                    }
+                }
                 if state.wechatRunning {
                     HStack {
                         HintRow(systemImage: "exclamationmark.circle.fill", text: "安装前请先退出微信。", tint: .orange)
@@ -107,7 +125,7 @@ struct AdvancedInstallView: View {
                 HStack {
                     Button("试运行（不改动）") { Task { await state.checkOnly(request) } }
                         .buttonStyle(.bordered)
-                        .disabled(state.busy || !supported)
+                        .disabled(state.busy || !supported || !modeAvailable || requiresRestore)
                     Button {
                         Task { await state.install(request) }
                     } label: {
@@ -115,7 +133,7 @@ struct AdvancedInstallView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
-                    .disabled(state.busy || !supported || state.wechatRunning)
+                    .disabled(state.busy || !supported || !modeAvailable || requiresRestore || state.wechatRunning)
                     if state.busy {
                         ProgressView().controlSize(.small)
                         Text(state.busyMessage).font(.caption).foregroundStyle(.secondary)

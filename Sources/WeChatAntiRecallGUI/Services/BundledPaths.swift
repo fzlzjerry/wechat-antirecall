@@ -93,17 +93,21 @@ enum BundledPaths {
         }
     }
 
-    /// The patches.json the CLI should use, passed via `--config`. Priority:
-    /// downloaded override (explicit data pull) → source-built copy → bundled baseline.
+    /// The patches.json the CLI should use, passed via `--config`.
+    ///
+    /// A downloaded catalog is not automatically authoritative forever. After an app update,
+    /// an older file in Application Support may cover fewer WeChat builds than the new bundled
+    /// catalog. Prefer the catalog with the highest numeric build; when both reach the same build,
+    /// prefer the one written most recently so an explicit in-app refresh can still replace the
+    /// bundled baseline.
     static var effectivePatchesJSON: URL {
-        if isValidCatalog(downloadedPatchesJSON) { return downloadedPatchesJSON }
         let built = builtDir.appendingPathComponent("patches.json")
-        if isValidCatalog(built) { return built }
-        return bundledPatchesJSON
+        let baseline = newerCatalog(built, bundledPatchesJSON) ?? bundledPatchesJSON
+        return newerCatalog(downloadedPatchesJSON, baseline) ?? baseline
     }
 
     static var usingDownloadedCatalog: Bool {
-        isValidCatalog(downloadedPatchesJSON)
+        effectivePatchesJSON.standardizedFileURL == downloadedPatchesJSON.standardizedFileURL
     }
 
     /// Minimal sanity: decodes as a non-empty array of objects each having `version` + `targets`.
@@ -114,5 +118,42 @@ enum BundledPaths {
             return false
         }
         return array.allSatisfy { $0["version"] is String && $0["targets"] is [Any] }
+    }
+
+    /// Returns the newer valid candidate, or nil when neither URL contains a valid catalog.
+    /// Internal visibility keeps this deterministic policy directly testable without touching
+    /// global Application Support state.
+    static func newerCatalog(_ lhs: URL, _ rhs: URL) -> URL? {
+        let lhsBuild = latestBuild(in: lhs)
+        let rhsBuild = latestBuild(in: rhs)
+
+        switch (lhsBuild, rhsBuild) {
+        case (nil, nil):
+            return nil
+        case (.some, nil):
+            return lhs
+        case (nil, .some):
+            return rhs
+        case let (.some(left), .some(right)) where left != right:
+            return left > right ? lhs : rhs
+        default:
+            let leftDate = modificationDate(of: lhs) ?? .distantPast
+            let rightDate = modificationDate(of: rhs) ?? .distantPast
+            return leftDate >= rightDate ? lhs : rhs
+        }
+    }
+
+    private static func latestBuild(in url: URL) -> Int? {
+        guard let data = try? Data(contentsOf: url),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              !array.isEmpty,
+              array.allSatisfy({ $0["version"] is String && $0["targets"] is [Any] }) else {
+            return nil
+        }
+        return array.compactMap { ($0["version"] as? String).flatMap(Int.init) }.max()
+    }
+
+    private static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
     }
 }

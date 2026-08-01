@@ -35,6 +35,7 @@ let package = Package(
             name: "WeChatAntiRecallTests",
             dependencies: [
                 "WeChatAntiRecall",
+                "WeChatAntiRecallGUI",
                 "WeChatAntiRecallRuntime"
             ]
         )

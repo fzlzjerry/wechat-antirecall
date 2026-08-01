@@ -2,6 +2,8 @@ import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject var state: AppState
+    var goToCustomTip: () -> Void
+    var goToAdvanced: () -> Void
     var goToUpdates: () -> Void
 
     var body: some View {
@@ -86,11 +88,11 @@ struct HomeView: View {
         Card {
             VStack(alignment: .leading, spacing: 14) {
                 HStack {
-                    SectionLabel(text: "静默防撤回")
+                    SectionLabel(text: activeMode.title)
                     Spacer()
                     installStatePill
                 }
-                Text("别人撤回的消息会原样留在聊天里，不显示任何提示。")
+                Text(activeMode.subtitle)
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
@@ -103,27 +105,55 @@ struct HomeView: View {
                     }
                 }
 
-                Button {
-                    Task { await state.install(InstallRequest(mode: .silent)) }
-                } label: {
-                    Text(state.installState == .installed ? "重新安装防撤回" : "开启防撤回")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 4)
+                if state.installedMode == .customTip {
+                    Button(action: goToCustomTip) {
+                        Label("修改自定义提示", systemImage: "text.bubble")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(Theme.accent)
+                } else {
+                    Button {
+                        Task { await state.install(InstallRequest(mode: .silent)) }
+                    } label: {
+                        Text(state.installState == .installed ? "重新安装防撤回" : "开启静默防撤回")
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .tint(Theme.accent)
+                    .disabled(state.busy || state.wechatRunning)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .tint(Theme.accent)
-                .disabled(state.busy || state.wechatRunning)
+
+                HStack(spacing: 12) {
+                    if state.installedMode != .customTip && state.runtimeTipSupported {
+                        Button("使用自定义提示") { goToCustomTip() }
+                            .buttonStyle(.link)
+                    }
+                    Button("更多安装选项") { goToAdvanced() }
+                        .buttonStyle(.link)
+                }
 
                 HintRow(systemImage: "info.circle",
-                        text: "安装会修改并重新签名微信，过程中会弹出一次管理员密码。装完请完全退出并重开微信。")
+                        text: state.installedMode == .customTip
+                            ? "自定义提示运行时已安装；修改短语后完全退出并重开微信即可生效。"
+                            : "安装会修改并重新签名微信。装完请完全退出并重开微信。")
             }
         }
     }
 
+    private var activeMode: InstallMode {
+        state.installedMode ?? .silent
+    }
+
     private var installStatePill: some View {
         switch state.installState {
-        case .installed: return AnyView(StatusPill(tone: .good, text: "已开启", systemImage: "checkmark.circle.fill"))
+        case .installed:
+            let text = state.installedMode == .customTip ? "自定义提示已开启" : "静默模式已开启"
+            return AnyView(StatusPill(tone: .good, text: text, systemImage: "checkmark.circle.fill"))
         case .notInstalled: return AnyView(StatusPill(tone: .neutral, text: "未开启"))
         case .mismatch: return AnyView(StatusPill(tone: .warn, text: "数据不匹配"))
         case .unknown: return AnyView(EmptyView())

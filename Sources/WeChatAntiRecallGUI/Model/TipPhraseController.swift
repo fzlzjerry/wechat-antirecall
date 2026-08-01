@@ -10,8 +10,10 @@ final class TipPhraseController: ObservableObject {
     @Published var busy: Bool = false
     @Published var validationError: String?
     @Published var saveMessage: String?
+    @Published var loadError: String?
 
     static let maxLength = 120
+    static let defaultPhrase = "已拦截一条撤回消息"
 
     // MARK: - Validation (mirrors RecallTipPhrase in the CLI)
 
@@ -28,26 +30,44 @@ final class TipPhraseController: ObservableObject {
 
     func load() async {
         busy = true; defer { busy = false }
+        validationError = nil
+        saveMessage = nil
+        loadError = nil
+
         let get = await CLIRunner.runUser(BundledPaths.cli, ["tip-phrase", "get"])
-        if let line = get.output.split(separator: "\n").first(where: { $0.hasPrefix("Phrase: ") }) {
+        if get.succeeded,
+           let line = get.output.split(separator: "\n").first(where: { $0.hasPrefix("Phrase: ") }) {
             phrase = String(line.dropFirst("Phrase: ".count))
+        } else {
+            // Never leave the editor as a misleading empty 0/120 field. App Data Protection can
+            // deny a newly signed GUI access to WeChat's container until Full Disk Access is
+            // granted; the default remains editable while the UI explains how to restore access.
+            phrase = Self.defaultPhrase
+            loadError = accessAwareMessage(
+                result: get,
+                fallback: "未能读取已保存的短语，当前先显示默认值。")
         }
+
         let probe = await CLIRunner.runUser(BundledPaths.cli, ["tip-phrase", "probe", "get"])
-        probeEnabled = probe.output.contains("enabled")
+        probeEnabled = probe.succeeded && probe.output.contains("enabled")
         await refreshPreview()
     }
 
-    func save() async {
+    @discardableResult
+    func save() async -> Bool {
         validationError = validate(phrase)
-        guard validationError == nil else { return }
+        guard validationError == nil else { return false }
         busy = true; defer { busy = false }
         let trimmed = phrase.trimmingCharacters(in: .whitespacesAndNewlines)
         let result = await CLIRunner.runUser(BundledPaths.cli, ["tip-phrase", "set", trimmed])
         if result.succeeded {
+            loadError = nil
             saveMessage = "已保存。改完请完全退出并重开微信。"
             await refreshPreview()
+            return true
         } else {
-            validationError = decodeError(result) ?? "保存失败。"
+            validationError = accessAwareMessage(result: result, fallback: "保存失败。")
+            return false
         }
     }
 
@@ -55,9 +75,10 @@ final class TipPhraseController: ObservableObject {
         busy = true; defer { busy = false }
         let result = await CLIRunner.runUser(BundledPaths.cli, ["tip-phrase", "reset"])
         if result.succeeded {
-            phrase = ""
-            saveMessage = "已恢复默认短语。"
             await load()
+            saveMessage = "已恢复默认短语。"
+        } else {
+            validationError = accessAwareMessage(result: result, fallback: "恢复默认短语失败。")
         }
     }
 
@@ -84,11 +105,27 @@ final class TipPhraseController: ObservableObject {
     func setProbe(_ enabled: Bool) async {
         busy = true; defer { busy = false }
         let result = await CLIRunner.runUser(BundledPaths.cli, ["tip-phrase", "probe", enabled ? "on" : "off"])
-        if result.succeeded { probeEnabled = enabled }
+        if result.succeeded {
+            probeEnabled = enabled
+        } else {
+            validationError = accessAwareMessage(result: result, fallback: "更新调试探针失败。")
+        }
     }
 
     private func decodeError(_ result: CLIResult) -> String? {
         let text = (result.stderr + result.output).trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? nil : text
+    }
+
+    private func accessAwareMessage(result: CLIResult, fallback: String) -> String {
+        let detail = decodeError(result) ?? ""
+        let lowered = detail.lowercased()
+        if lowered.contains("operation not permitted")
+            || lowered.contains("permission denied")
+            || lowered.contains("permission")
+            || lowered.contains("not authorized") {
+            return "macOS 阻止了对微信数据目录的访问。请为本 App 开启「完全磁盘访问」，然后退出并重新打开本 App。"
+        }
+        return detail.isEmpty ? fallback : "\(fallback) \(detail)"
     }
 }

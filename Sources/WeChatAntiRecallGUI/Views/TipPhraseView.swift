@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct TipPhraseView: View {
     @EnvironmentObject var state: AppState
@@ -9,6 +10,10 @@ struct TipPhraseView: View {
         VStack(alignment: .leading, spacing: Theme.gap) {
             Text("自定义提示").font(.title2.weight(.semibold))
 
+            if let banner = state.banner {
+                BannerView(banner: banner)
+            }
+
             if !state.runtimeTipSupported {
                 Card {
                     HintRow(systemImage: "exclamationmark.triangle",
@@ -17,8 +22,28 @@ struct TipPhraseView: View {
                 }
             }
 
+            if let loadError = controller.loadError {
+                Card {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HintRow(
+                            systemImage: "lock.trianglebadge.exclamationmark",
+                            text: loadError,
+                            tint: .orange)
+                        Button {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            Label("打开完全磁盘访问设置", systemImage: "arrow.up.forward.app")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+
             editorCard
             previewCard
+            installCard
             probeCard
         }
         .onAppear { Task { await controller.load() } }
@@ -55,8 +80,8 @@ struct TipPhraseView: View {
                 }
 
                 HStack {
-                    Button("保存") { Task { await controller.save() } }
-                        .buttonStyle(.borderedProminent).tint(Theme.accent)
+                    Button("仅保存") { Task { await controller.save() } }
+                        .buttonStyle(.bordered)
                         .disabled(controller.busy)
                     Button("恢复默认") { Task { await controller.reset() } }
                         .buttonStyle(.bordered)
@@ -64,7 +89,9 @@ struct TipPhraseView: View {
                     if controller.busy { ProgressView().controlSize(.small) }
                 }
                 HintRow(systemImage: "info.circle",
-                        text: "保存短语后，还需在「高级安装」用「自定义提示」模式安装 hook，并完全退出重开微信才会生效。")
+                        text: customTipInstalled
+                            ? "运行时已安装；保存后完全退出并重开微信即可生效。"
+                            : "可在下方一次完成「保存短语 + 安装运行时」，无需再跳到高级安装。")
             }
         }
     }
@@ -82,6 +109,48 @@ struct TipPhraseView: View {
                 Text("说明：构建号 269340、269341 会显示本次启动后缓存的文字或媒体类型；其他构建、冷缓存、已淘汰或 ID 缺失的消息会省略。")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var installCard: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SectionLabel(text: customTipInstalled ? "应用修改" : "保存并开启")
+                    Spacer()
+                    StatusPill(
+                        tone: customTipInstalled ? .good : .neutral,
+                        text: customTipInstalled ? "已安装" : "未安装",
+                        systemImage: customTipInstalled ? "checkmark.circle.fill" : "circle")
+                }
+
+                Text(customTipInstalled
+                     ? "当前已是自定义提示模式。保存新短语后，只需重启微信，不会重复修改或签名 App。"
+                     : "会先校验并保存短语，再检查补丁点、安装自定义提示运行时并重新签名微信。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if state.wechatRunning && !customTipInstalled {
+                    HStack {
+                        HintRow(systemImage: "exclamationmark.circle.fill", text: "首次安装前请先完全退出微信。", tint: .orange)
+                        Button("退出微信") { Task { await state.quitWeChat() } }
+                            .disabled(state.busy)
+                    }
+                }
+
+                Button {
+                    Task { await saveAndApply() }
+                } label: {
+                    Text(customTipInstalled ? "保存并应用" : "保存并开启自定义提示")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(Theme.accent)
+                .disabled(controller.busy || state.busy || !state.runtimeTipSupported || (state.wechatRunning && !customTipInstalled))
             }
         }
     }
@@ -127,6 +196,22 @@ struct TipPhraseView: View {
         debounce = Task {
             try? await Task.sleep(nanoseconds: 300_000_000)
             if !Task.isCancelled { await controller.refreshPreview() }
+        }
+    }
+
+    private var customTipInstalled: Bool {
+        state.installState == .installed && state.installedMode == .customTip
+    }
+
+    private func saveAndApply() async {
+        guard await controller.save() else { return }
+        if customTipInstalled {
+            state.banner = Banner(
+                kind: .success,
+                title: "自定义提示已保存",
+                message: "请完全退出并重开微信，新短语即可生效。")
+        } else {
+            await state.install(InstallRequest(mode: .customTip))
         }
     }
 }

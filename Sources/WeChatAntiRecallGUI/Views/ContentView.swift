@@ -38,7 +38,26 @@ enum NavSection: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var state: AppState
-    @State private var selection: NavSection? = .home
+    @SceneStorage("navigation.section") private var selectedSectionRaw = NavSection.home.rawValue
+    @SceneStorage("install.mode") private var installModeRaw = InstallMode.silent.rawValue
+    @SceneStorage("install.blockUpdate") private var blockUpdate = false
+    @SceneStorage("install.multiInstance") private var multiInstance = false
+
+    private var selectedSection: NavSection {
+        NavSection(rawValue: selectedSectionRaw) ?? .home
+    }
+
+    private var selection: Binding<NavSection?> {
+        Binding(
+            get: { selectedSection },
+            set: { selectedSectionRaw = ($0 ?? .home).rawValue })
+    }
+
+    private var installMode: Binding<InstallMode> {
+        Binding(
+            get: { InstallMode(rawValue: installModeRaw) ?? .silent },
+            set: { installModeRaw = $0.rawValue })
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -64,7 +83,7 @@ struct ContentView: View {
             .padding(.top, 18)
             .padding(.bottom, 14)
 
-            List(selection: $selection) {
+            List(selection: selection) {
                 ForEach(NavSection.allCases) { section in
                     Label(section.title, systemImage: section.icon)
                         .tag(section)
@@ -87,10 +106,19 @@ struct ContentView: View {
         VStack(spacing: 0) {
             ScrollView {
                 Group {
-                    switch selection ?? .home {
-                    case .home: HomeView(goToUpdates: { selection = .updates })
+                    switch selectedSection {
+                    case .home:
+                        HomeView(
+                            goToCustomTip: { navigate(to: .tipPhrase) },
+                            goToAdvanced: { navigate(to: .advanced) },
+                            goToUpdates: { navigate(to: .updates) })
                     case .tipPhrase: TipPhraseView()
-                    case .advanced: AdvancedInstallView()
+                    case .advanced:
+                        AdvancedInstallView(
+                            mode: installMode,
+                            blockUpdate: $blockUpdate,
+                            multiInstance: $multiInstance,
+                            goToRestore: { navigate(to: .restore) })
                     case .clone: CloneView()
                     case .restore: RestoreView()
                     case .updates: UpdatesView()
@@ -105,6 +133,10 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+
+    private func navigate(to section: NavSection) {
+        selectedSectionRaw = section.rawValue
     }
 }
 

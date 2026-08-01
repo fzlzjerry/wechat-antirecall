@@ -11,6 +11,7 @@ final class AppState: ObservableObject {
     @Published var directInfo: DirectAppInfo?
     @Published var supportStatus: SupportStatus = .unknown
     @Published var installState: InstallState = .unknown
+    @Published var installedMode: InstallMode?
     @Published var wechatRunning: Bool = false
 
     // Activity
@@ -80,32 +81,55 @@ final class AppState: ObservableObject {
                 supportStatus = .noWeChat
             }
             installState = .unknown
+            installedMode = nil
         }
     }
 
-    /// Uses an unprivileged silent dry-run to detect whether anti-recall is already applied.
+    /// Uses unprivileged dry-runs to distinguish the two mutually exclusive anti-recall modes.
+    /// Checking the custom runtime first is important: its first byte patch intentionally
+    /// restores the silent-mode branch, so a silent-only probe would otherwise report it as
+    /// merely "not installed" and the home page would show the wrong mode.
     private func computeInstallState() async {
         guard case .supported = supportStatus else {
             installState = .unknown
+            installedMode = nil
             return
         }
-        let configURL = BundledPaths.effectivePatchesJSON
-        let args = InstallRequest(mode: .silent).arguments(
-            appPath: appPath, configURL: configURL, runtimeDylibURL: BundledPaths.runtimeDylib, dryRun: true)
-        let result = await CLIRunner.runUser(BundledPaths.cli, args)
 
-        guard result.exitCode == 0,
-              let report = try? JSONDecoder().decode(InstallReport.self, from: Data(result.output.utf8)) else {
+        installedMode = nil
+
+        if runtimeTipSupported,
+           let customReport = await dryRunReport(for: InstallRequest(mode: .customTip)),
+           customReport.allEntriesClean,
+           customReport.alreadyApplied {
+            installState = .installed
+            installedMode = .customTip
+            return
+        }
+
+        guard let silentReport = await dryRunReport(for: InstallRequest(mode: .silent)) else {
             installState = .unknown
             return
         }
-        if !report.allEntriesClean {
+        if !silentReport.allEntriesClean {
             installState = .mismatch
-        } else if report.alreadyApplied {
+        } else if silentReport.alreadyApplied {
             installState = .installed
+            installedMode = .silent
         } else {
             installState = .notInstalled
         }
+    }
+
+    private func dryRunReport(for request: InstallRequest) async -> InstallReport? {
+        let args = request.arguments(
+            appPath: appPath,
+            configURL: BundledPaths.effectivePatchesJSON,
+            runtimeDylibURL: BundledPaths.runtimeDylib,
+            dryRun: true)
+        let result = await CLIRunner.runUser(BundledPaths.cli, args)
+        guard result.exitCode == 0 else { return nil }
+        return try? JSONDecoder().decode(InstallReport.self, from: Data(result.output.utf8))
     }
 
     // MARK: - Quit WeChat
@@ -165,6 +189,17 @@ final class AppState: ObservableObject {
         banner = nil
         appendLog("——— 开始：\(request.mode.title) ———")
 
+        // A custom-tip install changes additional bytes and injects a runtime dylib. Applying
+        // only the silent branch patch on top would leave those pieces behind and create a mixed
+        // installation. Force a full backup restore before switching in that direction.
+        if installedMode == .customTip && request.mode == .silent {
+            banner = Banner(
+                kind: .warning,
+                title: "请先恢复再切换模式",
+                message: "当前是「自定义提示」模式。请先到「恢复 / 卸载」还原最近一次备份，再安装「静默防撤回」，避免残留运行时 hook。")
+            return
+        }
+
         if WeChatStatusProbe.isRunning() {
             banner = Banner(kind: .warning, title: "请先退出微信", message: "安装前需要完全退出微信，避免签名失效导致崩溃。")
             return
@@ -194,9 +229,12 @@ final class AppState: ObservableObject {
                 banner = Banner(kind: .error, title: "补丁点不匹配", message: "当前微信的字节与补丁不符，可能版本数据过旧。请到「更新」页拉取最新补丁数据后重试。")
                 return
             }
-            if report.alreadyApplied && request.mode == .silent {
-                banner = Banner(kind: .info, title: "已经开启", message: "防撤回已经在生效中，无需重复安装。")
-                installState = .installed
+            if report.alreadyApplied {
+                banner = Banner(kind: .info, title: "已经开启", message: "\(request.mode.title)已经在生效中，无需重复安装。")
+                if request.mode != .updateOnly {
+                    installState = .installed
+                    installedMode = request.mode
+                }
                 return
             }
         }
