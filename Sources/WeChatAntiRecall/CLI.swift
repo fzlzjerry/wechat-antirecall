@@ -1766,6 +1766,43 @@ private func makeBackup(of fileURL: URL) throws -> URL {
     return backupURL
 }
 
+/// Ad-hoc re-signing preserves Hardened Runtime (`--preserve-metadata=...,runtime`) and the
+/// original entitlements, which is correct in principle but breaks the app in two ways under an
+/// ad-hoc identity:
+///
+/// 1. WeChat's entitlements carry Tencent's Team ID via `com.apple.application-identifier`
+///    (5A4RE8SF68…), so AMFI treats the re-signed main binary as belonging to that Team ID,
+///    while the re-signed frameworks are Team-less ad-hoc. Launching then aborts with "mapping
+///    process and mapped file (non-platform) have different Team IDs" the moment the main binary
+///    loads one of its own frameworks (e.g. WCDYWrapper.framework). Disabling library validation
+///    fixes this.
+/// 2. At login, `wechat.dylib` jumps into anonymously mapped RX memory (runtime-generated code
+///    next to roam_server.framework's `__LINKEDIT`). Hardened Runtime rejects unsigned anonymous
+///    executable pages with `Invalid Page` (SIGKILL, Namespace CODESIGNING). The original
+///    Developer-ID build runs this via `allow-jit`, but that only covers `MAP_JIT` mappings;
+///    `allow-unsigned-executable-memory` additionally covers plain mmap'd RX trampolines, which
+///    the Tencent code path uses under the re-signed identity.
+///
+/// Both entitlements are injected on every component that already carries entitlements. Returns
+/// the input unchanged when there are no entitlements or the plist cannot be parsed.
+private func injectDisableLibraryValidation(_ entitlements: Data?) -> Data? {
+    guard let entitlements else { return nil }
+    guard var dictionary = try? PropertyListSerialization.propertyList(
+        from: entitlements,
+        options: [],
+        format: nil
+    ) as? [String: Any] else {
+        return entitlements
+    }
+    dictionary["com.apple.security.cs.disable-library-validation"] = true
+    dictionary["com.apple.security.cs.allow-unsigned-executable-memory"] = true
+    return (try? PropertyListSerialization.data(
+        fromPropertyList: dictionary,
+        format: .xml,
+        options: 0
+    )) ?? entitlements
+}
+
 struct CodeSigningEntitlementsSnapshot {
     struct Entry {
         let url: URL
@@ -1780,7 +1817,7 @@ struct CodeSigningEntitlementsSnapshot {
         var entries: [Entry] = []
         for candidate in codeSigningCandidates(in: appURL) {
             if let signedCode = try inspectSignedCode(at: candidate) {
-                entries.append(Entry(url: candidate, plistData: signedCode.entitlements))
+                entries.append(Entry(url: candidate, plistData: injectDisableLibraryValidation(signedCode.entitlements)))
             }
         }
         return CodeSigningEntitlementsSnapshot(entries: entries)
