@@ -29,9 +29,9 @@ constexpr size_t revokeContentCacheMaximumCount = 512;
 constexpr size_t revokeContentPreviewMaximumBytes = 240;
 constexpr size_t arm64StubLength = 16;
 
-// IDA 9.4 call-site analysis (269340/269341) confirms this function takes exactly
+// Call-site analysis (269340/269341/269574) confirms this function takes exactly
 // three arguments. The second argument is the raw XML and the wrapper has already
-// copied it into handlerOutput+0x1A0.
+// copied it into the build-specific handlerOutput replaceMsg field.
 using ParseRevokeXML = bool (*)(void *, std::string *, void *);
 using FinalizeMessage = void (*)(void *, int);
 
@@ -67,8 +67,8 @@ struct InlineRevokeHookConfig {
 };
 
 // The revoke XML handler is selected only for message-extension types 71/72, so it
-// cannot observe ordinary text/media messages. Builds 269340/269341 therefore carry
-// a second inline hook at the common Message finalizer. IDA shows every incoming
+// cannot observe ordinary text/media messages. Builds 269340/269341/269574 therefore carry
+// a second inline hook at the common Message finalizer. Call-path analysis shows every incoming
 // Message reaches this function after serverId/msgType/content have been populated
 // and immediately before its type-specific extension parser is dispatched.
 struct InlineMessageCaptureHookConfig {
@@ -173,6 +173,11 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // newmsgid store remain unchanged, and this build independently decodes the same
     // output fields (newMsgId=0x198, replaceMsg=0x1A0). SLOT remains 0x9a9ff00.
     {"269341", 0x462e60c, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x462e618, 0x198, 0x1a0},
+    // 269574 (WeChat 4.1.13): normalized full-function matching against the official
+    // 269341 arm64 slice has a single strong match at 0x4905488. The +0x270 guard and
+    // +0xA10 newmsgid store keep the same geometry, while the output layout moves to
+    // newMsgId=0x1C8 and replaceMsg=0x1D0. The entry stub targets SLOT 0x9ecbf00.
+    {"269574", 0x4905488, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4905494, 0x1c8, 0x1d0},
 };
 
 constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
@@ -200,6 +205,19 @@ constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
         0x45ce5b0,
         {0x39494008, 0x7100051F, 0x7A400820},
         0x45ce5bc,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 269574: the network constructor at 0x48A27B8 still copies serverId to +0xF8,
+    // content to +0x130, and routes msgType through 0x48A3494 to +0x0C before its
+    // unconditional call to the common finalizer at 0x48A3B20. The finalizer keeps
+    // the ldrb/cmp/ccmp entry shape; only the finalized flag moves from +0x250 to +0x258.
+    {
+        "269574",
+        0x48a3b20,
+        {0x39496008, 0x7100051F, 0x7A400820},
+        0x48a3b2c,
         0x0f8,
         0x00c,
         0x130,
@@ -2105,8 +2123,8 @@ int wechat_antirecall_message_capture_inline_hook_selftest(void) {
         return 0;
     }
 
-    // Exact 269340/269341 Message-finalizer prefix, followed by a tiny conditional body:
-    // byte(+0x250)==1 && mode==0 returns 0x11; every other case returns 0x22.
+    // Message-finalizer prefix shape used by 269340/269341/269574, followed by a tiny conditional body.
+    // This synthetic fixture uses byte(+0x250)==1 && mode==0 for the true branch.
     // The trampoline's literal load and register branch must preserve NZCV from ccmp
     // so the original b.eq still selects the right path.
     const uint32_t savedPrefix[inlineSavedInstructionCount] = {
