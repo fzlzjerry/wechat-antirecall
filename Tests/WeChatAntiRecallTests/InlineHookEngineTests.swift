@@ -105,6 +105,30 @@ final class InlineHookEngineTests: XCTestCase {
         XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&messageBytes, 0x48a3568), 0x9ecbf08)
     }
 
+    func testEncoderMatchesRecorded269576StaticPatches() throws {
+        var revokeBytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x490521c, 0x9ecbf00, &revokeBytes), 1)
+        XCTAssertEqual(revokeBytes.map { String(format: "%02X", $0) }.joined(), "30AE02D0108247F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&revokeBytes, 0x490521c), 0x9ecbf00)
+
+        var messageBytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x48a38b4, 0x9ecbf08, &messageBytes), 1)
+        XCTAssertEqual(messageBytes.map { String(format: "%02X", $0) }.joined(), "50B10290108647F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&messageBytes, 0x48a38b4), 0x9ecbf08)
+    }
+
+    func testEncoderMatchesRecorded269577StaticPatches() throws {
+        var revokeBytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x4958824, 0x9f57f00, &revokeBytes), 1)
+        XCTAssertEqual(revokeBytes.map { String(format: "%02X", $0) }.joined(), "F0AF02F0108247F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&revokeBytes, 0x4958824), 0x9f57f00)
+
+        var messageBytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x48f64dc, 0x9f57f08, &messageBytes), 1)
+        XCTAssertEqual(messageBytes.map { String(format: "%02X", $0) }.joined(), "10B302B0108647F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&messageBytes, 0x48f64dc), 0x9f57f08)
+    }
+
     /// Non-stub bytes must not decode as a slot (guards against false positives that
     /// would make the runtime treat an unpatched entry as installed).
     func testDecodeRejectsNonStubBytes() throws {
@@ -127,7 +151,7 @@ final class InlineHookEngineTests: XCTestCase {
     func testMessageCaptureTrampolinePreservesConditionalFlags() throws {
         XCTAssertEqual(
             wechat_antirecall_message_capture_inline_hook_selftest(), 1,
-            "269340/269341/269574/269575 Message-finalizer trampoline did not preserve the ccmp flags"
+            "269340/269341/269574/269575/269576/269577 Message-finalizer trampoline did not preserve the ccmp flags"
         )
     }
 }

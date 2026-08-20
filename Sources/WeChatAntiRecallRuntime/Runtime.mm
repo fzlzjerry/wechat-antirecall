@@ -29,7 +29,7 @@ constexpr size_t revokeContentCacheMaximumCount = 512;
 constexpr size_t revokeContentPreviewMaximumBytes = 240;
 constexpr size_t arm64StubLength = 16;
 
-// Call-site analysis (269340/269341/269574/269575) confirms this function takes exactly
+// Call-site analysis (269340/269341/269574/269575/269576/269577) confirms this function takes exactly
 // three arguments. The second argument is the raw XML and the wrapper has already
 // copied it into the build-specific handlerOutput replaceMsg field.
 using ParseRevokeXML = bool (*)(void *, std::string *, void *);
@@ -67,7 +67,7 @@ struct InlineRevokeHookConfig {
 };
 
 // The revoke XML handler is selected only for message-extension types 71/72, so it
-// cannot observe ordinary text/media messages. Builds 269340/269341/269574/269575 therefore carry
+// cannot observe ordinary text/media messages. Builds 269340/269341/269574/269575/269576/269577 therefore carry
 // a second inline hook at the common Message finalizer. Call-path analysis shows every incoming
 // Message reaches this function after serverId/msgType/content have been populated
 // and immediately before its type-specific extension parser is dispatched.
@@ -183,6 +183,19 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // store stay put, and this build independently decodes the same output fields
     // (newMsgId=0x1C8, replaceMsg=0x1D0). SLOT remains 0x9ecbf00.
     {"269575", 0x4904ed0, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4904edc, 0x1c8, 0x1d0},
+    // 269576 (WeChat 4.1.13 hotfix): the 269574/269575 geometry remains the unique
+    // full-slice match and relocates uniformly by +0x34C from 269575. The +0x270
+    // guard and +0xA10 newmsgid store stay put, and this build independently
+    // decodes the same output fields (newMsgId=0x1C8, replaceMsg=0x1D0). SLOT
+    // remains 0x9ecbf00; the entry stub ADRP changes because the parser crossed
+    // a 4K page boundary.
+    {"269576", 0x490521c, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4905228, 0x1c8, 0x1d0},
+    // 269577 (WeChat 4.1.13.9): the 269574+ geometry remains the unique full-slice
+    // match. The parser relocates by +0x53608 from 269576 to 0x4958824; the
+    // +0x270 guard and +0xA10 newmsgid store stay put, and this build
+    // independently decodes the same output fields (newMsgId=0x1C8,
+    // replaceMsg=0x1D0). SLOT moves with __DATA to 0x9f57f00.
+    {"269577", 0x4958824, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4958830, 0x1c8, 0x1d0},
 };
 
 constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
@@ -236,6 +249,35 @@ constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
         0x48a3568,
         {0x39496008, 0x7100051F, 0x7A400820},
         0x48a3574,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 269576: the network constructor at 0x48A254C still copies serverId to +0xF8
+    // (str x8,[x19,#0xF8]), content to +0x130 (add x0,x19,#0x130 then std::string
+    // assign), and routes msgType through 0x48A3228 to +0x0C before its
+    // unconditional call to the common finalizer at 0x48A38B4. The finalizer
+    // keeps the ldrb/cmp/ccmp entry shape, finalized flag at +0x258, and SLOT
+    // 0x9ecbf08 on the same page as 269575.
+    {
+        "269576",
+        0x48a38b4,
+        {0x39496008, 0x7100051F, 0x7A400820},
+        0x48a38c0,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 269577: the network constructor at 0x48F5174 still copies serverId to +0xF8
+    // (str x8,[x19,#0xF8]), routes msgType through 0x48F5E50 to +0x0C, and
+    // unconditionally calls the common finalizer at 0x48F64DC. The finalizer
+    // keeps the ldrb/cmp/ccmp entry shape, finalized flag at +0x258, and SLOT
+    // 0x9f57f08.
+    {
+        "269577",
+        0x48f64dc,
+        {0x39496008, 0x7100051F, 0x7A400820},
+        0x48f64e8,
         0x0f8,
         0x00c,
         0x130,
@@ -2141,7 +2183,7 @@ int wechat_antirecall_message_capture_inline_hook_selftest(void) {
         return 0;
     }
 
-    // Message-finalizer prefix shape used by 269340/269341/269574/269575, followed by a tiny conditional body.
+    // Message-finalizer prefix shape used by 269340/269341/269574/269575/269576/269577, followed by a tiny conditional body.
     // This synthetic fixture uses byte(+0x250)==1 && mode==0 for the true branch.
     // The trampoline's literal load and register branch must preserve NZCV from ccmp
     // so the original b.eq still selects the right path.

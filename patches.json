@@ -1600,5 +1600,89 @@
         ]
       }
     ]
+  },
+  {
+    "version": "269576",
+    "targets": [
+      {
+        "identifier": "revoke",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "490548c", "expected": "40100034", "asm": "82000014" }
+        ]
+      },
+      {
+        "identifier": "revoke-tip",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "490548c", "expected": ["40100034", "82000014"], "asm": "40100034" },
+          { "arch": "arm64", "addr": "4905c2c", "expected": "60E600F9", "asm": "7FE600F9" }
+        ]
+      },
+      {
+        "identifier": "update",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "27c814", "expected": "FC6FBBA9", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "27e94c", "expected": "FFC305D1", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "27ec10", "expected": "FF4301D1", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "27eff0", "expected": "F657BDA9", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "28935c", "expected": "00604039C0035FD6", "asm": "00008052C0035FD6" },
+          { "arch": "arm64", "addr": "289364", "expected": "02600039", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "28936c", "expected": "00644039C0035FD6", "asm": "00008052C0035FD6" },
+          { "arch": "arm64", "addr": "289374", "expected": "02640039", "asm": "C0035FD6" }
+        ]
+      },
+      {
+        "identifier": "runtime-tip",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "490521c", "expected": "F85FBCA9F65701A9F44F02A9", "asm": "30AE02D0108247F900021FD6" },
+          { "arch": "arm64", "addr": "48a38b4", "expected": "086049391F0500712008407A", "asm": "50B10290108647F900021FD6" }
+        ]
+      }
+    ]
+  },
+  {
+    "version": "269577",
+    "targets": [
+      {
+        "identifier": "revoke",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "4958a94", "expected": "40100034", "asm": "82000014" }
+        ]
+      },
+      {
+        "identifier": "revoke-tip",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "4958a94", "expected": ["40100034", "82000014"], "asm": "40100034" },
+          { "arch": "arm64", "addr": "4959234", "expected": "60E600F9", "asm": "7FE600F9" }
+        ]
+      },
+      {
+        "identifier": "update",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "27d068", "expected": "FC6FBBA9", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "27f1a0", "expected": "FFC305D1", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "27f464", "expected": "FF4301D1", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "27f844", "expected": "F657BDA9", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "289bb0", "expected": "00604039C0035FD6", "asm": "00008052C0035FD6" },
+          { "arch": "arm64", "addr": "289bb8", "expected": "02600039", "asm": "C0035FD6" },
+          { "arch": "arm64", "addr": "289bc0", "expected": "00644039C0035FD6", "asm": "00008052C0035FD6" },
+          { "arch": "arm64", "addr": "289bc8", "expected": "02640039", "asm": "C0035FD6" }
+        ]
+      },
+      {
+        "identifier": "runtime-tip",
+        "binary": "Contents/Resources/wechat.dylib",
+        "entries": [
+          { "arch": "arm64", "addr": "4958824", "expected": "F85FBCA9F65701A9F44F02A9", "asm": "F0AF02F0108247F900021FD6" },
+          { "arch": "arm64", "addr": "48f64dc", "expected": "086049391F0500712008407A", "asm": "10B302B0108647F900021FD6" }
+        ]
+      }
+    ]
   }
 ]
