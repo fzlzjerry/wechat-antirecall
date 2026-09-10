@@ -432,9 +432,7 @@ struct RecallTipPreferenceStore {
     }
 
     func save(_ phrase: RecallTipPhrase) throws {
-        var preferences = try readPreferences()
-        preferences[Self.key] = phrase.text
-        try writePreferences(preferences)
+        try writePreferenceValue(phrase.text, type: "-string", forKey: Self.key)
     }
 
     func reset() throws {
@@ -442,11 +440,11 @@ struct RecallTipPreferenceStore {
             return
         }
 
-        var preferences = try readPreferences()
-        guard preferences.removeValue(forKey: Self.key) != nil else {
+        let preferences = try readPreferences()
+        guard preferences[Self.key] != nil else {
             return
         }
-        try writePreferences(preferences)
+        try deletePreferenceValue(forKey: Self.key)
     }
 
     func isProbeEnabled() throws -> Bool {
@@ -455,9 +453,7 @@ struct RecallTipPreferenceStore {
     }
 
     func setProbeEnabled(_ enabled: Bool) throws {
-        var preferences = try readPreferences()
-        preferences[Self.probeKey] = enabled
-        try writePreferences(preferences)
+        try writePreferenceValue(enabled ? "true" : "false", type: "-bool", forKey: Self.probeKey)
     }
 
     private func readPreferences() throws -> [String: Any] {
@@ -486,18 +482,44 @@ struct RecallTipPreferenceStore {
         return preferences
     }
 
-    private func writePreferences(_ preferences: [String: Any]) throws {
+    /// Mutate one key through CFPreferences' system client instead of replacing the
+    /// plist file directly. A direct atomic file write leaves cfprefsd's cached domain
+    /// untouched; when WeChat next starts (or synchronizes preferences), the daemon can
+    /// overwrite the new phrase/probe flag with its stale in-memory copy.
+    private func writePreferenceValue(_ value: String, type: String, forKey key: String) throws {
         try FileManager.default.createDirectory(
             at: preferenceFileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
 
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: preferences,
-            format: .binary,
-            options: 0
-        )
-        try data.write(to: preferenceFileURL, options: .atomic)
+        do {
+            try runProcess(
+                "/usr/bin/defaults",
+                ["write", preferenceDomainPath, key, type, value]
+            )
+        } catch {
+            throw ToolError.fileOperationFailed(
+                operation: "写入撤回提示配置",
+                path: preferenceFileURL.path,
+                underlying: error.localizedDescription
+            )
+        }
+    }
+
+    private func deletePreferenceValue(forKey key: String) throws {
+        do {
+            try runProcess("/usr/bin/defaults", ["delete", preferenceDomainPath, key])
+        } catch {
+            throw ToolError.fileOperationFailed(
+                operation: "删除撤回提示配置",
+                path: preferenceFileURL.path,
+                underlying: error.localizedDescription
+            )
+        }
+    }
+
+    private var preferenceDomainPath: String {
+        preferenceFileURL.deletingPathExtension().path
     }
 
     private static func defaultHomeDirectory() -> URL {

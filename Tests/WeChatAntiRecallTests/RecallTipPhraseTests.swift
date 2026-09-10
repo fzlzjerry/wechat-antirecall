@@ -216,8 +216,7 @@ final class RecallTipPhraseTests: XCTestCase {
     }
 
     func testPreferenceStoreWritesWechatContainerPlist() throws {
-        let homeDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+        let homeDirectory = makePreferenceTestHomeDirectory()
         defer {
             try? FileManager.default.removeItem(at: homeDirectory)
         }
@@ -245,8 +244,7 @@ final class RecallTipPhraseTests: XCTestCase {
     }
 
     func testPreferenceStoreCanWriteCloneBundleDomain() throws {
-        let homeDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+        let homeDirectory = makePreferenceTestHomeDirectory()
         defer {
             try? FileManager.default.removeItem(at: homeDirectory)
         }
@@ -270,8 +268,7 @@ final class RecallTipPhraseTests: XCTestCase {
     }
 
     func testPreferenceStoreWritesProbeFlag() throws {
-        let homeDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+        let homeDirectory = makePreferenceTestHomeDirectory()
         defer {
             try? FileManager.default.removeItem(at: homeDirectory)
         }
@@ -293,9 +290,35 @@ final class RecallTipPhraseTests: XCTestCase {
         XCTAssertFalse(try store.isProbeEnabled())
     }
 
+    func testPreferenceStoreMutationsAreVisibleThroughPreferencesDaemon() throws {
+        let homeDirectory = makePreferenceTestHomeDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: homeDirectory)
+        }
+
+        let store = RecallTipPreferenceStore(homeDirectory: homeDirectory)
+        let domainPath = store.preferenceFileURL.deletingPathExtension().path
+        let phrase = try RecallTipPhrase("已拦截 {from} 撤回：{content}")
+
+        // Prime cfprefsd with a stale domain before the store mutates it. A direct
+        // PropertyListSerialization write is not visible here and is later overwritten.
+        try runDefaults(["write", domainPath, "ExistingSetting", "-string", "preserved"])
+        try store.save(phrase)
+        try store.setProbeEnabled(true)
+
+        var exported = try exportedDefaultsDomain(domainPath)
+        XCTAssertEqual(exported["ExistingSetting"] as? String, "preserved")
+        XCTAssertEqual(exported[RecallTipPreferenceStore.key] as? String, phrase.text)
+        XCTAssertEqual(exported[RecallTipPreferenceStore.probeKey] as? Bool, true)
+
+        try store.reset()
+        exported = try exportedDefaultsDomain(domainPath)
+        XCTAssertNil(exported[RecallTipPreferenceStore.key])
+        XCTAssertEqual(exported[RecallTipPreferenceStore.probeKey] as? Bool, true)
+    }
+
     func testPreferenceResetDoesNotCreateMissingPlist() throws {
-        let homeDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+        let homeDirectory = makePreferenceTestHomeDirectory()
         defer {
             try? FileManager.default.removeItem(at: homeDirectory)
         }
@@ -329,6 +352,57 @@ final class RecallTipPhraseTests: XCTestCase {
             options: 0)
         try data.write(to: contentsURL.appendingPathComponent("Info.plist"))
         return appURL
+    }
+
+    private func runDefaults(_ arguments: [String]) throws {
+        let process = Process()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errorPipe
+        try process.run()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "RecallTipPhraseTests.defaults",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: String(data: errorData, encoding: .utf8) ?? "defaults failed"]
+            )
+        }
+    }
+
+    private func makePreferenceTestHomeDirectory() -> URL {
+        // `defaults` rejects arbitrary preference domains below macOS's per-user
+        // /var/folders temporary root. /private/tmp exercises the same absolute-path
+        // domain behavior used in production without that test-only restriction.
+        URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("wechat-antirecall-tests-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func exportedDefaultsDomain(_ domainPath: String) throws -> [String: Any] {
+        let process = Process()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        process.arguments = ["export", domainPath, "-"]
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "RecallTipPhraseTests.defaults",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: String(data: errorData, encoding: .utf8) ?? "defaults export failed"]
+            )
+        }
+        return try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any]
+        )
     }
 
 }
