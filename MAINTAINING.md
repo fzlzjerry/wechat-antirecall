@@ -4,6 +4,8 @@
 
 用户向的使用说明在 [README.md](README.md)。
 
+Intel 协作见 [#55](https://github.com/fzlzjerry/wechat-antirecall/issues/55)。实体 Intel 上微信 4.1.13/build 269630 的独立 runtime、合成自测与双路径人工验收见 [Intel 269630 实测报告](Docs/intel-269630-runtime-tip.md)；这是实验性参考实现，不改变 GUI/CLI 或发行版支持范围。环境信息可使用 [Intel 只读预检](Docs/intel-preflight.md) 收集。
+
 实验性自动红包的协议、对象布局与 ABI 证据见 [红包逆向记录](Docs/red-packet-269624.md)。该功能复用已有消息 finalizer hook，默认关闭；目前适配 269624 与 269628，范围独立于防撤回构建表。
 
 ---
