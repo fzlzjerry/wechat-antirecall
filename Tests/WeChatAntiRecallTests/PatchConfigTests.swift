@@ -610,6 +610,56 @@ final class PatchConfigTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("269628"))
     }
 
+    func testBuild270090SupportsInlineHookRecallPatchesAndUpdateBlock() throws {
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "270090" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip", "update", "runtime-tip"])
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke" }?.entries.first?.address, 0x4bbe83c)
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke-tip" }?.entries.map(\.address), [0x4bbe83c, 0x4bbefdc])
+
+        let update = try XCTUnwrap(config.targets.first { $0.identifier == "update" })
+        XCTAssertEqual(update.entries.map(\.address), [
+            0x2768ac, 0x278ad8, 0x278da8, 0x2791c8,
+            0x283a48, 0x283a50, 0x283a58, 0x283a60
+        ])
+        XCTAssertTrue(update.entries.allSatisfy { $0.patchBytes.suffix(4) == (try! Data(hexString: "C0035FD6")) })
+
+        let runtimeTip = try XCTUnwrap(config.targets.first { $0.identifier == "runtime-tip" })
+        XCTAssertEqual(runtimeTip.entries[0].address, 0x4bbe5cc)
+        XCTAssertEqual(runtimeTip.entries[0].expectedBytes, [try Data(hexString: "F85FBCA9F65701A9F44F02A9")])
+        XCTAssertEqual(runtimeTip.entries[0].patchBytes, try Data(hexString: "10BD02B0108247F900021FD6"))
+        XCTAssertEqual(runtimeTip.entries[1].address, 0x4b5b0a0)
+        XCTAssertEqual(runtimeTip.entries[1].expectedBytes, [try Data(hexString: "086049391F0500712008407A")])
+        XCTAssertEqual(runtimeTip.entries[1].patchBytes, try Data(hexString: "30C00290108647F900021FD6"))
+        XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("270090"))
+    }
+
+    func testBuild270100SupportsInlineHookRecallPatchesAndUpdateBlock() throws {
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "270100" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip", "update", "runtime-tip"])
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke" }?.entries.first?.address, 0x4bc4fa4)
+        XCTAssertEqual(config.targets.first { $0.identifier == "revoke-tip" }?.entries.map(\.address), [0x4bc4fa4, 0x4bc5744])
+
+        let update = try XCTUnwrap(config.targets.first { $0.identifier == "update" })
+        XCTAssertEqual(update.entries.map(\.address), [
+            0x274f04, 0x277130, 0x277400, 0x277820,
+            0x2820a0, 0x2820a8, 0x2820b0, 0x2820b8
+        ])
+        XCTAssertTrue(update.entries.allSatisfy { $0.patchBytes.suffix(4) == (try! Data(hexString: "C0035FD6")) })
+
+        let runtimeTip = try XCTUnwrap(config.targets.first { $0.identifier == "runtime-tip" })
+        XCTAssertEqual(runtimeTip.entries[0].address, 0x4bc4d34)
+        XCTAssertEqual(runtimeTip.entries[0].expectedBytes, [try Data(hexString: "F85FBCA9F65701A9F44F02A9")])
+        XCTAssertEqual(runtimeTip.entries[0].patchBytes, try Data(hexString: "10BD02F010FA47F900021FD6"))
+        XCTAssertEqual(runtimeTip.entries[1].address, 0x4b61808)
+        XCTAssertEqual(runtimeTip.entries[1].expectedBytes, [try Data(hexString: "086049391F0500712008407A")])
+        XCTAssertEqual(runtimeTip.entries[1].patchBytes, try Data(hexString: "30C002D010FE47F900021FD6"))
+        XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("270100"))
+    }
+
     private func loadPatchConfigs() throws -> [VersionConfig] {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("patches.json")

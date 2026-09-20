@@ -124,7 +124,7 @@ std::optional<Packet> parse(const std::string &raw) {
 }
 
 bool canOpen(int retcode, bool sender, int received, int status, int type, bool hasTiming) {
-    // PayRedEnvelopeCoverViewModel: 269624 sub_126FAE4 / 269628 sub_126F6B4 / 270090 sub_12E25E4.
+    // PayRedEnvelopeCoverViewModel: 269624 sub_126FAE4 / 269628 sub_126F6B4 / 270090 sub_12E25E4 / 270100 sub_12E1798.
     return retcode == 0 && !sender && received == 0 && (status == 2 || status == 3) &&
         (type == 0 || type == 1 || type == 3) && hasTiming;
 }
@@ -341,6 +341,23 @@ constexpr Profile kProfiles[] = {
             {0x4e157c, {0xd10303ff, 0xa9085ff8, 0xa90957f6}},
             {0x42ce06c, {0xd10503ff, 0xa90f67fa, 0xa9105ff8}},
             {0x42cd87c, {0xa9bc6ffc, 0xa90157f6, 0xa9024ff4}},
+        },
+    },
+    {
+        "270100", 0x15000, 0x6fcda80,
+        0x4b6508c, 0x3830d4, 0x4518fe8, 0x441fc5c,
+        0x42dc09c, 0x42dc0a4, 0x4e095c,
+        0x9a619b8, 0x9a667a0, 0x9cc9138, 0x9cc91b8, 0x9cfbd78,
+        {
+            {0x4b6508c, {0xd101c3ff, 0xa9035ff8, 0xa90457f6}},
+            {0x3830d4, {0xa9be4ff4, 0xa9017bfd, 0x910043fd}},
+            {0x4518fe8, {0xf002ec08, 0xf944bd00, 0xd65f03c0}},
+            {0x441fc5c, {0xd107c3ff, 0xa91a67fa, 0xa91b5ff8}},
+            {0x42dc09c, {0xf9401c00, 0x17ff82cc, 0xf9401c00}},
+            {0x42dc0a4, {0xf9401c00, 0x17ff83c9, 0xf9401c00}},
+            {0x4e095c, {0xd10303ff, 0xa9085ff8, 0xa90957f6}},
+            {0x42d5398, {0xd10503ff, 0xa90f67fa, 0xa9105ff8}},
+            {0x42d4ba8, {0xa9bc6ffc, 0xa90157f6, 0xa9024ff4}},
         },
     },
 };

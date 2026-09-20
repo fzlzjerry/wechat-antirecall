@@ -2,7 +2,7 @@ import Foundation
 
 struct RedPacketSettings: Codable, Equatable {
     static let preferenceKey = "WeChatAntiRecall_RedPacket"
-    static let supportedBuilds: Set<String> = ["269624", "269628", "270090"]
+    static let supportedBuilds: Set<String> = ["269624", "269628", "270090", "270100"]
     static let runtimeMarker = "WeChatAntiRecallRedPacket:4"
     var enabled = false
     var delayMilliseconds = 500
