@@ -96,9 +96,11 @@ final class RedPacketTests: XCTestCase {
     func testPreferenceRoundTripPreservesWeChatSettings() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let store = RedPacketPreferenceStore(preferenceFileURL: folder.appendingPathComponent("preferences.plist"))
+        let store = RedPacketPreferenceStore(
+            preferences: RecallTipPreferenceStore(homeDirectory: folder, domain: "com.tencent.xinWeChat"))
         XCTAssertEqual(try store.load(), RedPacketSettings())
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: store.preferenceFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let existing: [String: Any] = ["Unrelated": "preserve", "WeChatAntiRecall_RevokeTipPhrase": "custom"]
         try PropertyListSerialization.data(fromPropertyList: existing, format: .binary, options: 0).write(to: store.preferenceFileURL)
         try store.save(RedPacketSettings(enabled: true, delayMilliseconds: 300))

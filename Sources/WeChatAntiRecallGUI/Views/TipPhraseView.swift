@@ -233,7 +233,9 @@ struct TipPhraseView: View {
                 Card {
                     HintRow(
                         systemImage: "exclamationmark.triangle",
-                        text: "当前构建虽已识别，但未同时提供自定义提示所需的运行时和提示补丁。你仍可保存短语，安装按钮会保持不可用。",
+                        text: state.customTipRuntimeOutdated
+                            ? "最新补丁数据已支持当前微信，但此应用内置的运行组件较旧，暂时无法安装自定义提示。请更新本应用，或在「检查更新」中从最新源码构建后再试；短语仍可先保存。"
+                            : "当前构建虽已识别，但未同时提供自定义提示所需的运行时和提示补丁。你仍可保存短语，安装按钮会保持不可用。",
                         tint: .orange)
                 }
             }
@@ -261,6 +263,9 @@ struct TipPhraseView: View {
         }
         if state.customTipAvailable {
             return "可在下方一次完成「保存短语 + 安装运行时」，无需再跳到高级安装。"
+        }
+        if state.customTipRuntimeOutdated {
+            return "短语会正常保存；更新本应用或从最新源码构建运行组件后，即可安装自定义提示。"
         }
         return "短语会保存到当前微信的配置；此构建目前不能安装自定义提示，页面不会执行补丁或签名操作。"
     }
