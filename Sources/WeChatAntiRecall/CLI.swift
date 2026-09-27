@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 import Darwin
 
 private let defaultAppPath = "/Applications/WeChat.app"
@@ -413,51 +414,124 @@ struct RecallTipPreferenceStore {
     static let probeKey = "WeChatAntiRecall_RevokeTipDebugProbe"
 
     let preferenceFileURL: URL
+    let domain: String
+
+    private let usesSystemPreferences: Bool
+
+    var preferenceLocationDescription: String {
+        usesSystemPreferences ? "CFPreferences domain \(domain)" : preferenceFileURL.path
+    }
 
     init(
-        homeDirectory: URL = RecallTipPreferenceStore.defaultHomeDirectory(),
+        homeDirectory: URL? = nil,
         domain: String = RecallTipPreferenceStore.domain
     ) {
-        preferenceFileURL = homeDirectory
+        let resolvedHomeDirectory = homeDirectory ?? RecallTipPreferenceStore.defaultHomeDirectory()
+        self.domain = domain
+        usesSystemPreferences = homeDirectory == nil
+        preferenceFileURL = resolvedHomeDirectory
             .appendingPathComponent("Library/Containers/\(domain)/Data/Library/Preferences")
             .appendingPathComponent("\(domain).plist")
     }
 
     func load() throws -> RecallTipPhrase? {
-        let preferences = try readPreferences()
-        guard let value = preferences[Self.key] as? String else {
+        guard let value = try preferenceValue(forKey: Self.key) as? String else {
             return nil
         }
         return try RecallTipPhrase(value)
     }
 
     func save(_ phrase: RecallTipPhrase) throws {
-        var preferences = try readPreferences()
-        preferences[Self.key] = phrase.text
-        try writePreferences(preferences)
+        try setPreferenceValue(phrase.text, forKey: Self.key)
     }
 
     func reset() throws {
-        guard FileManager.default.fileExists(atPath: preferenceFileURL.path) else {
-            return
+        guard try preferenceValue(forKey: Self.key) != nil else { return }
+        try setPreferenceValue(nil, forKey: Self.key)
+        if usesSystemPreferences {
+            try removeLegacyPreferenceValue(forKey: Self.key)
         }
-
-        var preferences = try readPreferences()
-        guard preferences.removeValue(forKey: Self.key) != nil else {
-            return
-        }
-        try writePreferences(preferences)
     }
 
     func isProbeEnabled() throws -> Bool {
-        let preferences = try readPreferences()
-        return preferences[Self.probeKey] as? Bool ?? false
+        try preferenceValue(forKey: Self.probeKey) as? Bool ?? false
     }
 
     func setProbeEnabled(_ enabled: Bool) throws {
+        try setPreferenceValue(enabled, forKey: Self.probeKey)
+    }
+
+    func preferenceValue(forKey key: String) throws -> Any? {
+        if usesSystemPreferences {
+            try synchronizeSystemPreferences()
+            let value = CFPreferencesCopyValue(
+                key as CFString,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+            // Releases prior to this fix wrote the container plist directly. Keep reading
+            // that value as a migration fallback, but all new writes go through cfprefsd.
+            if let value { return value }
+            return try readPreferences()[key]
+        }
+
+        return try readPreferences()[key]
+    }
+
+    func setPreferenceValue(_ value: Any?, forKey key: String) throws {
+        if usesSystemPreferences {
+            try requireUserContext()
+            CFPreferencesSetValue(
+                key as CFString,
+                value as CFPropertyList?,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost
+            )
+            try synchronizeSystemPreferences()
+            return
+        }
+
         var preferences = try readPreferences()
-        preferences[Self.probeKey] = enabled
+        if let value {
+            preferences[key] = value
+        } else {
+            preferences.removeValue(forKey: key)
+        }
         try writePreferences(preferences)
+    }
+
+    private func removeLegacyPreferenceValue(forKey key: String) throws {
+        guard FileManager.default.fileExists(atPath: preferenceFileURL.path) else { return }
+        var preferences = try readPreferences()
+        guard preferences.removeValue(forKey: key) != nil else { return }
+        try writePreferences(preferences)
+    }
+
+    // cfprefsd only redirects a sandboxed app's domain to its container for the calling
+    // user; under sudo the request would go to root's cfprefsd instead.
+    private func requireUserContext() throws {
+        if geteuid() == 0,
+           let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
+           sudoUser != "root" {
+            throw ToolError.usage("微信偏好设置需以当前用户身份修改，请不要使用 sudo 运行此命令。")
+        }
+    }
+
+    private func synchronizeSystemPreferences() throws {
+        try requireUserContext()
+        guard CFPreferencesSynchronize(
+            domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesAnyHost
+        ) else {
+            throw ToolError.fileOperationFailed(
+                operation: "同步微信偏好设置",
+                path: domain,
+                underlying: "CFPreferencesSynchronize returned false"
+            )
+        }
     }
 
     private func readPreferences() throws -> [String: Any] {
@@ -775,7 +849,7 @@ struct CLI {
         let options = try RedPacketOptions(arguments)
         let info = try readAppInfo(appPath: options.appPath)
         let store = RedPacketPreferenceStore(
-            preferenceFileURL: RecallTipPreferenceStore(domain: info.bundleIdentifier).preferenceFileURL)
+            preferences: RecallTipPreferenceStore(domain: info.bundleIdentifier))
         let runtimeData = try? Data(contentsOf: info.appURL.appendingPathComponent(RuntimeTipInstaller.destinationDylibPath), options: .mappedIfSafe)
         let runtimeAvailable = runtimeData?.range(of: Data(RedPacketSettings.runtimeMarker.utf8)) != nil
         var settings = options.enabled == false ? ((try? store.load()) ?? RedPacketSettings()) : try store.load()
@@ -819,20 +893,20 @@ struct CLI {
             let phrase = try store.load() ?? .default
             print("Domain: \(domain)")
             print("Key: \(RecallTipPreferenceStore.key)")
-            print("File: \(store.preferenceFileURL.path)")
+            print("Preferences: \(store.preferenceLocationDescription)")
             print("Phrase: \(phrase.text)")
         case .set(let phrase):
             try store.save(phrase)
             print("Saved recall tip phrase.")
             print("Domain: \(domain)")
             print("Key: \(RecallTipPreferenceStore.key)")
-            print("File: \(store.preferenceFileURL.path)")
+            print("Preferences: \(store.preferenceLocationDescription)")
             printPreview(phrase: phrase, senderName: "张三", messageKind: "文本消息", messageText: "这是一条示例消息")
         case .reset:
             try store.reset()
             print("Reset recall tip phrase to default.")
             print("Domain: \(domain)")
-            print("File: \(store.preferenceFileURL.path)")
+            print("Preferences: \(store.preferenceLocationDescription)")
             printPreview(phrase: .default, senderName: "张三", messageKind: "文本消息", messageText: "这是一条示例消息")
         case .preview(let phrase, let senderName, let messageKind, let messageText):
             printPreview(phrase: phrase, senderName: senderName, messageKind: messageKind, messageText: messageText)
@@ -841,12 +915,12 @@ struct CLI {
             case .get:
                 print("Debug probe: \(try store.isProbeEnabled() ? "enabled" : "disabled")")
                 print("Domain: \(domain)")
-                print("File: \(store.preferenceFileURL.path)")
+                print("Preferences: \(store.preferenceLocationDescription)")
             case .set(let enabled):
                 try store.setProbeEnabled(enabled)
                 print("Debug probe: \(enabled ? "enabled" : "disabled")")
                 print("Domain: \(domain)")
-                print("File: \(store.preferenceFileURL.path)")
+                print("Preferences: \(store.preferenceLocationDescription)")
                 if enabled {
                     print("Warning: probe logs revoke metadata and XML previews to macOS Console. Turn it off after collecting evidence.")
                 }

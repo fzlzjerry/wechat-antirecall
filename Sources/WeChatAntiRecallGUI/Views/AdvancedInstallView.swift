@@ -159,6 +159,9 @@ struct AdvancedInstallView: View {
     private func unavailableReason(for candidate: InstallMode) -> String {
         switch candidate {
         case .customTip:
+            if state.customTipRuntimeOutdated {
+                return "最新补丁已支持；请更新本应用，或在「检查更新」中从最新源码构建运行组件"
+            }
             return "当前版本未同时提供自定义提示所需的运行时和提示补丁"
         case .updateOnly:
             return "当前版本没有可用的屏蔽更新补丁点"

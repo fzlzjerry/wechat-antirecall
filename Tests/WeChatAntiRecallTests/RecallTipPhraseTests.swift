@@ -1,4 +1,5 @@
 import XCTest
+import CoreFoundation
 @testable import WeChatAntiRecall
 
 final class RecallTipPhraseTests: XCTestCase {
@@ -291,6 +292,84 @@ final class RecallTipPhraseTests: XCTestCase {
 
         try store.setProbeEnabled(false)
         XCTAssertFalse(try store.isProbeEnabled())
+    }
+
+    func testDefaultPreferenceStoreUsesSystemPreferences() throws {
+        let domain = "com.wechat-antirecall.tests.\(UUID().uuidString)"
+        let store = RecallTipPreferenceStore(domain: domain)
+        let phrase = try RecallTipPhrase("system preference phrase")
+        let legacyContainerURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/\(domain)", isDirectory: true)
+        defer {
+            try? store.reset()
+            try? FileManager.default.removeItem(at: legacyContainerURL)
+            CFPreferencesSetValue(
+                RecallTipPreferenceStore.probeKey as CFString,
+                nil,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost)
+            CFPreferencesSynchronize(
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost)
+            try? FileManager.default.removeItem(
+                at: FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Preferences/\(domain).plist"))
+        }
+
+        try store.save(phrase)
+        try store.setProbeEnabled(true)
+
+        XCTAssertEqual(try store.load(), phrase)
+        XCTAssertTrue(try store.isProbeEnabled())
+        XCTAssertEqual(
+            CFPreferencesCopyValue(
+                RecallTipPreferenceStore.probeKey as CFString,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost) as? Bool,
+            true)
+        XCTAssertEqual(
+            CFPreferencesCopyValue(
+                RecallTipPreferenceStore.key as CFString,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost) as? String,
+            phrase.text)
+
+        try store.reset()
+        XCTAssertNil(try store.load())
+
+        try FileManager.default.createDirectory(
+            at: store.preferenceFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        let legacyData = try PropertyListSerialization.data(
+            fromPropertyList: [
+                RecallTipPreferenceStore.key: phrase.text,
+                "UnrelatedPreference": "preserve",
+            ],
+            format: .binary,
+            options: 0)
+        try legacyData.write(to: store.preferenceFileURL)
+
+        XCTAssertNil(
+            CFPreferencesCopyValue(
+                RecallTipPreferenceStore.key as CFString,
+                domain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesAnyHost))
+        XCTAssertEqual(try store.load(), phrase)
+
+        try store.reset()
+        let resetData = try Data(contentsOf: store.preferenceFileURL)
+        let resetPlist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: resetData,
+                options: [],
+                format: nil) as? [String: Any])
+        XCTAssertNil(resetPlist[RecallTipPreferenceStore.key])
+        XCTAssertEqual(resetPlist["UnrelatedPreference"] as? String, "preserve")
     }
 
     func testPreferenceResetDoesNotCreateMissingPlist() throws {

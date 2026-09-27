@@ -1,5 +1,10 @@
 # 微信防撤回 for macOS
 
+> [!TIP]
+> **🖼️ 推荐项目：WallpaperMachine**
+>
+> 官网：**[wallpapermachine.app](https://www.wallpapermachine.app/)** · GitHub：**[WallpaperMachine/WallpaperMachine](https://github.com/WallpaperMachine/WallpaperMachine)**
+
 一个面向普通用户的 macOS 微信 4 工具：保留被撤回的消息，也支持自定义提示、微信多开、屏蔽自动更新和一键还原。
 
 **[下载最新版](https://github.com/fzlzjerry/wechat-antirecall/releases)** · [遇到问题](#遇到问题) · [进阶用法](#进阶用户命令行)

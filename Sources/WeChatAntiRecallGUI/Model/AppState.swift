@@ -75,6 +75,14 @@ final class AppState: ObservableObject {
         guard let versions else { return false }
         return versions.runtimeTipSupported && versions.features.customTip && versions.features.tip
     }
+    var customTipRuntimeOutdated: Bool {
+        guard let versions else { return false }
+        return versions.supported
+            && versions.features.tip
+            && versions.installedBuildTargets.contains("revoke-tip")
+            && versions.installedBuildTargets.contains("runtime-tip")
+            && !versions.runtimeTipSupported
+    }
     var updateOnlyAvailable: Bool { versions?.features.blockUpdate ?? false }
 
     func isInstallModeAvailable(_ mode: InstallMode) -> Bool {

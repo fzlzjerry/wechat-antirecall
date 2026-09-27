@@ -1,7 +1,7 @@
 import Foundation
 
 // Manages the custom recall-tip phrase. All operations run at the user's own privilege
-// (never elevated) because the phrase lives in the per-user WeChat container plist.
+// (never elevated) because the phrase is stored in the user's WeChat preferences domain.
 @MainActor
 final class TipPhraseController: ObservableObject {
     @Published var phrase: String = ""

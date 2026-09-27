@@ -91,11 +91,15 @@ struct RedPacketOptions {
 }
 
 struct RedPacketPreferenceStore {
-    let preferenceFileURL: URL
+    // Shares the recall-tip store so writes go through cfprefsd and survive WeChat relaunches.
+    let preferences: RecallTipPreferenceStore
+
+    var preferenceFileURL: URL { preferences.preferenceFileURL }
 
     func load() throws -> RedPacketSettings {
-        let preferences = try read()
-        guard let value = preferences[RedPacketSettings.preferenceKey] else { return RedPacketSettings() }
+        guard let value = try preferences.preferenceValue(forKey: RedPacketSettings.preferenceKey) else {
+            return RedPacketSettings()
+        }
         let data = try PropertyListSerialization.data(fromPropertyList: value, format: .binary, options: 0)
         let settings = try PropertyListDecoder().decode(RedPacketSettings.self, from: data)
         try settings.validate()
@@ -104,24 +108,11 @@ struct RedPacketPreferenceStore {
 
     func save(_ settings: RedPacketSettings) throws {
         try settings.validate()
-        var preferences = try read()
-        preferences[RedPacketSettings.preferenceKey] = [
+        try preferences.setPreferenceValue([
             "enabled": settings.enabled,
             "delayMilliseconds": settings.delayMilliseconds,
             "notifyOnly": settings.notifyOnly
-        ]
-        let data = try PropertyListSerialization.data(fromPropertyList: preferences, format: .binary, options: 0)
-        try FileManager.default.createDirectory(at: preferenceFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: preferenceFileURL, options: .atomic)
-    }
-
-    private func read() throws -> [String: Any] {
-        guard FileManager.default.fileExists(atPath: preferenceFileURL.path) else { return [:] }
-        let data = try Data(contentsOf: preferenceFileURL)
-        guard let result = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
-            throw ToolError.usage("微信偏好设置不是有效的字典，未修改配置。")
-        }
-        return result
+        ], forKey: RedPacketSettings.preferenceKey)
     }
 }
 
