@@ -9,7 +9,10 @@ import Foundation
 // Every top-level report carries `schemaVersion` so a newer build-from-source CLI paired
 // with an older GUI (or vice versa) is detectable.
 
-let jsonSchemaVersion = 1
+// v2: red-packet settings gained `notifyOnly` (notify-only mode) and the runtime
+// marker moved to WeChatAntiRecallRedPacket:5.
+
+let jsonSchemaVersion = 2
 
 enum JSONOutput {
     static let encoder: JSONEncoder = {

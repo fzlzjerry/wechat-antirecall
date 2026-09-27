@@ -858,10 +858,11 @@ struct CLI {
                 throw ToolError.usage("自动红包暂仅适配微信构建 \(RedPacketSettings.supportedBuilds.sorted().joined(separator: "、"))；当前构建为 \(info.buildVersion)。")
             }
             if enabled && !runtimeAvailable {
-                throw ToolError.usage("请先安装或更新包含自动红包功能的自定义提示运行时，再开启此设置。")
+                throw ToolError.usage("请先安装或更新包含红包功能的自定义提示运行时，再开启此设置。")
             }
             settings.enabled = enabled
             if let delay = options.delayMilliseconds { settings.delayMilliseconds = delay }
+            if let notifyOnly = options.notifyOnly { settings.notifyOnly = notifyOnly }
             try store.save(settings)
         }
         let report = RedPacketReport(
@@ -871,8 +872,12 @@ struct CLI {
         if options.json {
             JSONOutput.emit(report)
         } else {
-            print("自动红包：\(settings.enabled ? "已开启" : "已关闭")")
-            print("等待时间：\(settings.delayMilliseconds) 毫秒")
+            let modeText = !settings.enabled ? "已关闭"
+                : (settings.notifyOnly ? "已开启（仅提醒）" : "已开启（自动领取）")
+            print("自动红包：\(modeText)")
+            if settings.enabled && !settings.notifyOnly {
+                print("等待时间：\(settings.delayMilliseconds) 毫秒")
+            }
             print("构建：\(info.buildVersion)（\(report.supported ? "已适配" : "未适配")）")
             print("需要本版本的自定义提示运行时。更换运行时后请重启微信。")
         }
@@ -1015,7 +1020,9 @@ struct CLI {
           wechat-antirecall tip-phrase reset [--app /Applications/WeChat.app]
           wechat-antirecall tip-phrase preview <phrase> [--from <name>] [--type <kind>] [--message <text>]
           wechat-antirecall tip-phrase probe get|on|off [--app /Applications/WeChat.app]
-          wechat-antirecall red-packet get|on|off [--delay-ms 500] [--app /Applications/WeChat.app] [--json]
+          wechat-antirecall red-packet get|on|off [--notify-only] [--delay-ms 500] [--app /Applications/WeChat.app] [--json]
+          red-packet on --notify-only switches to notify-only mode: a red packet only
+          raises a macOS notification (including muted chats) and is never opened.
 
         Notes:
           install only patches versions present in patches.json.

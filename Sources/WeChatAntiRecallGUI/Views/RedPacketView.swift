@@ -9,13 +9,24 @@ struct RedPacketView: View {
         controller.runtimeAvailable && state.installedMode == .customTip && state.installState == .installed
     }
 
+    private var modeDescription: String {
+        switch controller.mode {
+        case .off:
+            return "开启后处理新收到的普通红包。每个红包只处理一次，跳过历史消息、自己发送和已经领取的红包。"
+        case .grab:
+            return "自动接收并拆开新收到的普通红包，跳过历史消息、自己发送和已经领取的红包。每个红包只尝试一次。"
+        case .notifyOnly:
+            return "收到红包时弹 macOS 系统通知提醒（包括已静默的群聊），不会自动领取。点击通知可打开微信，每个红包只提醒一次。"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.gap) {
             HStack {
-                Text("自动红包").font(.title2.weight(.semibold))
+                Text("红包助手").font(.title2.weight(.semibold))
                 StatusPill(tone: .neutral, text: "已实测", systemImage: "checkmark.circle")
             }
-            Text("自动处理新收到的普通红包，跳过历史消息、自己发送和已经领取的红包。每个红包只尝试一次。")
+            Text(modeDescription)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let banner = state.banner { BannerView(banner: banner) }
@@ -50,21 +61,35 @@ struct RedPacketView: View {
                             Button("退出微信") { Task { await state.quitWeChat() } }.disabled(state.busy)
                         }
                     } else if !controller.supported && !controller.busy && controller.error == nil {
-                        Text("当前所选构建尚未适配，无法开启自动红包。")
+                        Text("当前所选构建尚未适配，无法开启红包功能。")
                             .font(.callout).foregroundStyle(.secondary)
                     }
                 }
             }
             Card {
                 VStack(alignment: .leading, spacing: 14) {
-                    Toggle("自动领取新红包", isOn: Binding(
-                        get: { controller.enabled },
-                        set: { value in Task { await controller.setEnabled(value, appPath: state.appPath) } }))
-                        .disabled(controller.busy || state.busy || (!controller.enabled && (!runtimeInstalled || !controller.supported)))
-                    Stepper("收到后等待 \(controller.delayMilliseconds) 毫秒", value: $controller.delayMilliseconds, in: 0...5000, step: 100)
-                        .disabled(controller.busy || state.busy)
-                    if controller.enabled {
-                        Button("保存等待时间") { Task { await controller.setEnabled(true, appPath: state.appPath) } }
+                    SectionLabel(text: "工作模式")
+                    Picker("红包模式", selection: Binding(
+                        get: { controller.mode },
+                        set: { newMode in
+                            // Without the runtime component only turning off is
+                            // reachable, mirroring the original toggle semantics.
+                            guard newMode == .off || (runtimeInstalled && controller.supported) else { return }
+                            Task { await controller.setMode(newMode, appPath: state.appPath) }
+                        }
+                    )) {
+                        ForEach(RedPacketController.Mode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(controller.busy || state.busy ||
+                        (controller.mode == .off && (!runtimeInstalled || !controller.supported)))
+                    if controller.mode == .grab {
+                        Stepper("收到后等待 \(controller.delayMilliseconds) 毫秒", value: $controller.delayMilliseconds, in: 0...5000, step: 100)
+                            .disabled(controller.busy || state.busy)
+                        Button("保存等待时间") { Task { await controller.setMode(.grab, appPath: state.appPath) } }
                             .disabled(controller.busy || state.busy)
                     }
                     if let message = controller.message {

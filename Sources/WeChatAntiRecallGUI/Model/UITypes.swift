@@ -7,7 +7,9 @@ struct GUIError: LocalizedError {
 }
 
 enum GUICLIProtocol {
-    static let schemaVersion = 1
+    // v2: red-packet settings gained notifyOnly; keep in lockstep with the CLI's
+    // jsonSchemaVersion (both ship from the same source tree).
+    static let schemaVersion = 2
 }
 
 enum InstallMode: String, CaseIterable, Identifiable {

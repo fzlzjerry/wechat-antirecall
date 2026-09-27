@@ -1,6 +1,8 @@
 #import <Foundation/Foundation.h>
+#import <UserNotifications/UserNotifications.h>
 #include <atomic>
 #include <cstring>
+#include <cctype>
 #include <ctime>
 #include <deque>
 #include <dlfcn.h>
@@ -65,7 +67,19 @@
 @end
 
 namespace red_packet {
-struct Packet { std::string id, sender; };
+struct Packet { std::string id, sender; bool senderDisplay = false; };
+
+// Raw WeChat identifiers (wxid_*, custom accounts, phone numbers) consist of
+// ASCII [A-Za-z0-9_-]; rendered nicknames virtually always contain at least one
+// other character (CJK, emoji, whitespace). Pure-ID senders fall back to the
+// generic notification body instead of surfacing a raw ID.
+bool senderLooksDisplayable(const std::string &name) {
+    if (name.empty()) return false;
+    for (const unsigned char c : name) {
+        if (!(std::isalnum(c) != 0 || c == '_' || c == '-')) return true;
+    }
+    return false;
+}
 
 std::optional<Packet> parse(const std::string &raw) {
     if (raw.empty() || raw.size() > 65536 || raw.find('\0') != std::string::npos ||
@@ -103,7 +117,9 @@ std::optional<Packet> parse(const std::string &raw) {
             if (!sender.empty() && sender != prefix) return {};
             sender = prefix;
         }
-        return Packet{sendID.UTF8String, sender};
+        // A group prefix (or direct-chat fromusername) can still be a raw WeChat
+        // ID, so displayability is decided by the identifier heuristic above.
+        return Packet{sendID.UTF8String, sender, senderLooksDisplayable(sender)};
     }
 }
 
@@ -113,24 +129,34 @@ bool canOpen(int retcode, bool sender, int received, int status, int type, bool 
         (type == 0 || type == 1 || type == 3) && hasTiming;
 }
 
-struct Settings { bool enabled = false; int delay = 500; };
+struct Settings { bool enabled = false; bool notifyOnly = false; int delay = 500; };
 Settings settings() {
     @autoreleasepool {
         NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
         if (!bundle.length) return {};
+        // The container plist is the one RecallTipPreferenceStore (CLI/GUI) always
+        // writes; a legacy non-container plist may predate newer keys, so it must
+        // only ever act as a fallback, never shadow the container file.
         NSArray *paths = @[
-            [NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Preferences/%@.plist", bundle]],
-            [NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Containers/%@/Data/Library/Preferences/%@.plist", bundle, bundle]]
+            [NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Containers/%@/Data/Library/Preferences/%@.plist", bundle, bundle]],
+            [NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"Library/Preferences/%@.plist", bundle]]
         ];
         for (NSString *path in paths) {
             id value = [NSDictionary dictionaryWithContentsOfFile:path][@"WeChatAntiRecall_RedPacket"];
             if (!value) continue;
             if (![value isKindOfClass:NSDictionary.class]) return {};
+            // notifyOnly is optional for compatibility with settings written by
+            // older tool versions; when present it must be a strict boolean.
+            id notify = value[@"notifyOnly"];
+            bool notifyOnly = false;
+            if (notify && (![notify isKindOfClass:NSNumber.class] ||
+                           CFGetTypeID((__bridge CFTypeRef)notify) != CFBooleanGetTypeID())) return {};
+            notifyOnly = notify ? [notify boolValue] != NO : false;
             id enabled = value[@"enabled"], delay = value[@"delayMilliseconds"];
             if (![enabled isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)enabled) != CFBooleanGetTypeID() ||
                 ![delay isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)delay) == CFBooleanGetTypeID() ||
                 [delay doubleValue] != [delay intValue] || [delay intValue] < 0 || [delay intValue] > 5000) return {};
-            return Settings{[enabled boolValue] != NO, [delay intValue]};
+            return Settings{[enabled boolValue] != NO, notifyOnly, [delay intValue]};
         }
         return {};
     }
@@ -155,6 +181,71 @@ template <class T> T field(const void *p, size_t offset) {
     T value;
     std::memcpy(&value, static_cast<const uint8_t *>(p) + offset, sizeof(T));
     return value;
+}
+
+// Notify-only alerts are deduplicated per sendId on the main queue, so one red
+// packet message never produces a second banner even if WeChat re-delivers it.
+Ledger &notifyLedger() { static Ledger value; return value; }
+
+// Posts a local notification through WeChat's own notification identity, so
+// banners appear regardless of the chat's mute state (mute only gates WeChat's
+// own banner decision, which this path never consults). Best effort: an
+// unavailable center or denied authorization degrades to the os_log status.
+// stillFresh is taken by value: the settings/authorization completion handlers
+// outlive this call, and a block capturing a reference would capture nothing
+// that is still alive by the time they run.
+void notifyRedPacket(const std::string &sender, bool senderDisplay, std::function<bool()> stillFresh) {
+    @autoreleasepool {
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        if (!center) {
+            os_log_error(OS_LOG_DEFAULT, "[WeChatAntiRecall] red-packet: notification center unavailable");
+            return;
+        }
+        UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+        content.title = @"微信红包提醒";
+        NSString *who = (senderDisplay && !sender.empty())
+            ? ([NSString stringWithUTF8String:sender.c_str()] ?: @"")
+            : @"";
+        content.body = who.length ? [NSString stringWithFormat:@"%@ 发来一个红包，请及时查看。", who]
+                                  : @"收到一个红包，请及时查看。";
+        content.sound = [UNNotificationSound defaultSound];
+        UNNotificationRequest *request = [UNNotificationRequest
+            requestWithIdentifier:[@"wxar-red-packet-" stringByAppendingString:NSUUID.UUID.UUIDString]
+            content:content trigger:nil];
+        void (^deliver)(void) = ^{
+            // The authorization round-trip can outlast a mode switch or the
+            // freshness window; re-check both on the main queue before the
+            // banner goes out.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                const auto current = settings();
+                if (!current.enabled || !current.notifyOnly) return;
+                if (!stillFresh()) return;
+                [center addNotificationRequest:request withCompletionHandler:^(NSError *error) {
+                    if (error) os_log_error(OS_LOG_DEFAULT, "[WeChatAntiRecall] red-packet: notification failed: %{public}@", error);
+                }];
+            });
+        };
+        [center getNotificationSettingsWithCompletionHandler:^(UNNotificationSettings *status) {
+            switch (status.authorizationStatus) {
+                case UNAuthorizationStatusAuthorized:
+                case UNAuthorizationStatusProvisional:
+                    deliver();
+                    return;
+                case UNAuthorizationStatusNotDetermined: {
+                    [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+                                          completionHandler:^(BOOL granted, NSError *error) {
+                        if (granted) deliver();
+                        else os_log_info(OS_LOG_DEFAULT, "[WeChatAntiRecall] red-packet: notification authorization denied");
+                        (void)error;
+                    }];
+                    return;
+                }
+                default:
+                    os_log_info(OS_LOG_DEFAULT, "[WeChatAntiRecall] red-packet: notification authorization denied");
+                    return;
+            }
+        }];
+    }
 }
 
 #if defined(__arm64__)
@@ -390,7 +481,10 @@ public:
     }
     bool eligible(const std::shared_ptr<Attempt> &a) {
         Api *api = activeApi.load();
-        return api && current == a && settings().enabled && enabled.load() &&
+        // One snapshot: two settings() calls could straddle a disable and mix a
+        // stale enabled flag with a fresh notifyOnly value.
+        const auto prefs = settings();
+        return api && current == a && prefs.enabled && !prefs.notifyOnly &&
             fresh(a->created, activated.load(), static_cast<uint64_t>(std::time(nullptr))) &&
             api->account() == a->account;
     }
@@ -498,6 +592,35 @@ void wechat_antirecall_red_packet_observe(void *message, int mode) {
         if (!raw || !from || !to) return;
         auto packet = parse(*raw);
         if (!packet) return;
+        if (settings().notifyOnly) {
+            // Notify-only: never touch the payment service or its task queue.
+            // Re-check everything on the main queue so a mid-flight settings
+            // change or stale message cannot alert, and apply the same account
+            // filters as Engine::enqueue so synced self-sent packets stay silent.
+            auto packetId = packet->id;
+            auto senderName = packet->sender;
+            auto senderNamed = packet->senderDisplay;
+            auto packetFrom = *from;
+            auto packetTo = *to;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                const auto current = settings();
+                if (!current.enabled || !current.notifyOnly) return;
+                const auto now = static_cast<uint64_t>(std::time(nullptr));
+                if (!fresh(created, activated.load(), now)) return;
+                Api *api = activeApi.load();
+                if (!api) return;
+                const auto account = api->account();
+                if (account.empty() || packetFrom.empty() || packetTo != account ||
+                    packetFrom == account || senderName == account) return;
+                if (!notifyLedger().reserve(packetId, now)) return;
+                // Re-evaluated inside notifyRedPacket after the authorization
+                // round-trip, which can finish long after the 60-second window.
+                notifyRedPacket(senderName, senderNamed, [created] {
+                    return fresh(created, activated.load(), static_cast<uint64_t>(std::time(nullptr)));
+                });
+            });
+            return;
+        }
         if (scheduled.fetch_add(1) >= maximumPending) { scheduled.fetch_sub(1); return; }
         reserved = true;
         auto a = std::make_shared<Attempt>();
@@ -551,7 +674,7 @@ red_packet::Subscription fakePacketSubscribe(red_packet::NativeTask *task,
 
 extern "C" {
 const char *wechat_antirecall_red_packet_runtime_version(void) {
-    return "WeChatAntiRecallRedPacket:4";
+    return "WeChatAntiRecallRedPacket:5";
 }
 int wechat_antirecall_red_packet_parse(const char *xml) {
     return xml && red_packet::parse(xml).has_value();

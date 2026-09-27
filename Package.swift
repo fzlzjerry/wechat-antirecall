@@ -28,7 +28,10 @@ let package = Package(
                 .unsafeFlags(["-std=gnu++17"])
             ],
             linkerSettings: [
-                .linkedFramework("Foundation")
+                .linkedFramework("Foundation"),
+                // Notify-only mode posts local notifications from inside WeChat via
+                // UNUserNotificationCenter; also used by the offline test host.
+                .linkedFramework("UserNotifications")
             ]
         ),
         .testTarget(

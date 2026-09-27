@@ -1,4 +1,5 @@
 import XCTest
+import Foundation
 import WeChatAntiRecallRuntime
 @testable import WeChatAntiRecall
 
@@ -85,12 +86,28 @@ final class RedPacketTests: XCTestCase {
         let enabled = try RedPacketOptions(["on", "--delay-ms", "0", "--app", "/tmp/WeChat.app"])
         XCTAssertEqual(enabled.enabled, true)
         XCTAssertEqual(enabled.delayMilliseconds, 0)
+        // Explicit false (not nil) is what lets "on --delay-ms" switch a
+        // notify-only configuration back to automatic grabbing.
+        XCTAssertEqual(enabled.notifyOnly, false)
         XCTAssertEqual(enabled.appPath, "/tmp/WeChat.app")
+        let notifyOnly = try RedPacketOptions(["on", "--notify-only", "--app", "/tmp/WeChat.app"])
+        XCTAssertEqual(notifyOnly.enabled, true)
+        XCTAssertEqual(notifyOnly.notifyOnly, true)
+        XCTAssertNil(notifyOnly.delayMilliseconds)
         for args in [[], ["enable"], ["get", "--delay-ms", "500"], ["off", "--delay-ms", "500"],
                      ["on", "--delay-ms", "-1"], ["on", "--delay-ms", "5001"], ["on", "--delay-ms", "1.5"],
-                     ["on", "--app"], ["get", "--json", "--json"], ["on", "--unknown"]] {
+                     ["on", "--app"], ["get", "--json", "--json"], ["on", "--unknown"],
+                     ["on", "--notify-only", "--delay-ms", "500"], ["get", "--notify-only"],
+                     ["off", "--notify-only"]] {
             XCTAssertThrowsError(try RedPacketOptions(args), "\(args)")
         }
+    }
+
+    func testRuntimeMarkerMatchesRuntimeExport() {
+        XCTAssertEqual(String(cString: wechat_antirecall_red_packet_runtime_version()),
+                       RedPacketSettings.runtimeMarker)
+        XCTAssertTrue(RedPacketSettings.runtimeMarker.hasSuffix(":5"),
+                      "notify-only needs a fresh runtime; the marker must move past the upstream :4")
     }
 
     func testPreferenceRoundTripPreservesWeChatSettings() throws {
@@ -103,11 +120,15 @@ final class RedPacketTests: XCTestCase {
             at: store.preferenceFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         let existing: [String: Any] = ["Unrelated": "preserve", "WeChatAntiRecall_RevokeTipPhrase": "custom"]
         try PropertyListSerialization.data(fromPropertyList: existing, format: .binary, options: 0).write(to: store.preferenceFileURL)
-        try store.save(RedPacketSettings(enabled: true, delayMilliseconds: 300))
-        XCTAssertEqual(try store.load(), RedPacketSettings(enabled: true, delayMilliseconds: 300))
+        try store.save(RedPacketSettings(enabled: true, delayMilliseconds: 300, notifyOnly: true))
+        XCTAssertEqual(try store.load(), RedPacketSettings(enabled: true, delayMilliseconds: 300, notifyOnly: true))
         let saved = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: store.preferenceFileURL), format: nil) as? [String: Any])
         XCTAssertEqual(saved["Unrelated"] as? String, "preserve")
         XCTAssertEqual(saved["WeChatAntiRecall_RevokeTipPhrase"] as? String, "custom")
+        let packet = try XCTUnwrap(saved["WeChatAntiRecall_RedPacket"] as? [String: Any])
+        XCTAssertEqual(packet["enabled"] as? Bool, true)
+        XCTAssertEqual(packet["delayMilliseconds"] as? Int, 300)
+        XCTAssertEqual(packet["notifyOnly"] as? Bool, true)
         let before = try Data(contentsOf: store.preferenceFileURL)
         XCTAssertThrowsError(try store.save(RedPacketSettings(enabled: true, delayMilliseconds: 9999)))
         XCTAssertEqual(try Data(contentsOf: store.preferenceFileURL), before)
@@ -115,5 +136,24 @@ final class RedPacketTests: XCTestCase {
         XCTAssertThrowsError(try store.load())
         XCTAssertThrowsError(try store.save(RedPacketSettings()))
         XCTAssertEqual(try String(contentsOf: store.preferenceFileURL), "broken plist")
+    }
+
+    func testLegacyPreferenceWithoutNotifyOnlyLoadsAsAutoGrabMode() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = RedPacketPreferenceStore(
+            preferences: RecallTipPreferenceStore(homeDirectory: folder, domain: "com.tencent.xinWeChat"))
+        try FileManager.default.createDirectory(
+            at: store.preferenceFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // Settings written by the :3 runtime era carry no notifyOnly key.
+        let legacy: [String: Any] = ["WeChatAntiRecall_RedPacket": ["enabled": true, "delayMilliseconds": 250]]
+        try PropertyListSerialization.data(fromPropertyList: legacy, format: .binary, options: 0)
+            .write(to: store.preferenceFileURL)
+        XCTAssertEqual(try store.load(), RedPacketSettings(enabled: true, delayMilliseconds: 250, notifyOnly: false))
+        // Missing required keys are rejected, matching the runtime loader.
+        let incomplete: [String: Any] = ["WeChatAntiRecall_RedPacket": ["enabled": true]]
+        try PropertyListSerialization.data(fromPropertyList: incomplete, format: .binary, options: 0)
+            .write(to: store.preferenceFileURL)
+        XCTAssertThrowsError(try store.load())
     }
 }

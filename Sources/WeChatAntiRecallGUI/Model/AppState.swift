@@ -348,11 +348,20 @@ final class AppState: ObservableObject {
         let result = await CLIRunner.runUser(BundledPaths.cli, args)
         if result.exitCode != 0 {
             if let envelope = try? JSONDecoder().decode(CLIErrorEnvelope.self, from: Data(result.output.utf8)) {
+                if quarantineStaleBuiltCLI(envelope.schemaVersion) {
+                    return try await dryRunProbe(for: request, appPath: appPath)
+                }
                 try requireSupportedSchema(envelope.schemaVersion)
                 if envelope.error.kind == "bytesMismatch" { return .mismatch }
                 throw GUIError(envelope.error.message)
             }
             throw GUIError(commandFailureMessage(result, operation: "检查补丁状态"))
+        }
+        // A stale source-built CLI can exit 0 with an outdated schema; retry with
+        // the bundled binary before surfacing the mismatch.
+        if let raw = try? JSONDecoder().decode(InstallReport.self, from: Data(result.output.utf8)),
+           raw.command == "install", quarantineStaleBuiltCLI(raw.schemaVersion) {
+            return try await dryRunProbe(for: request, appPath: appPath)
         }
         return .report(try decodeInstallReport(result.output))
     }
@@ -372,6 +381,9 @@ final class AppState: ObservableObject {
         ])
         guard result.exitCode == 0 else {
             if let envelope = try? JSONDecoder().decode(CLIErrorEnvelope.self, from: Data(result.output.utf8)) {
+                if quarantineStaleBuiltCLI(envelope.schemaVersion) {
+                    return try await versionsReport(appPath: appPath)
+                }
                 try requireSupportedSchema(envelope.schemaVersion)
                 throw GUIError(envelope.error.message)
             }
@@ -379,6 +391,9 @@ final class AppState: ObservableObject {
         }
         guard let report = try? JSONDecoder().decode(VersionsReport.self, from: Data(result.output.utf8)) else {
             throw GUIError("命令行工具返回了无法解析的版本信息。")
+        }
+        if quarantineStaleBuiltCLI(report.schemaVersion) {
+            return try await versionsReport(appPath: appPath)
         }
         try requireSupportedSchema(report.schemaVersion)
         return report
@@ -398,6 +413,37 @@ final class AppState: ObservableObject {
             throw GUIError(
                 "命令行接口版本不兼容（GUI 支持 \(GUICLIProtocol.schemaVersion)，工具返回 \(schemaVersion)）。")
         }
+    }
+
+    /// A source-built CLI from an older release keeps reporting its old schema
+    /// after an app upgrade, which would fail every GUI operation until the user
+    /// manually reverts. Quarantine the stale binary once so `BundledPaths.cli`
+    /// resolves to the bundled binary again. Returns true when a stale binary
+    /// was actually moved aside (bounds any retry to a single extra attempt).
+    @discardableResult
+    private func quarantineStaleBuiltCLI(_ reportedSchemaVersion: Int) -> Bool {
+        guard reportedSchemaVersion < GUICLIProtocol.schemaVersion,
+              BundledPaths.usingBuiltFromSource else { return false }
+        let stale = BundledPaths.builtDir.appendingPathComponent("wechat-antirecall")
+        guard FileManager.default.isExecutableFile(atPath: stale.path) else { return false }
+        let suffix = ".stale-schema\(reportedSchemaVersion)-\(Int(Date().timeIntervalSince1970))"
+        let quarantined = BundledPaths.builtDir.appendingPathComponent("wechat-antirecall\(suffix)")
+        do {
+            try FileManager.default.moveItem(at: stale, to: quarantined)
+        } catch {
+            return false
+        }
+        // The source-built runtime dylib belongs to the same stale build; move it
+        // too, or "安装或更新运行组件" would keep installing the outdated dylib
+        // and the bundled CLI would keep reporting runtimeAvailable == false.
+        let staleDylib = BundledPaths.builtDir.appendingPathComponent("libWeChatAntiRecallRuntime.dylib")
+        if FileManager.default.fileExists(atPath: staleDylib.path) {
+            try? FileManager.default.moveItem(
+                at: staleDylib,
+                to: BundledPaths.builtDir.appendingPathComponent("libWeChatAntiRecallRuntime.dylib\(suffix)"))
+        }
+        usingBuiltFromSource = BundledPaths.usingBuiltFromSource
+        return true
     }
 
     private func commandFailureMessage(_ result: CLIResult, operation: String) -> String {
