@@ -674,7 +674,7 @@ red_packet::Subscription fakePacketSubscribe(red_packet::NativeTask *task,
 
 extern "C" {
 const char *wechat_antirecall_red_packet_runtime_version(void) {
-    return "WeChatAntiRecallRedPacket:4";
+    return "WeChatAntiRecallRedPacket:5";
 }
 int wechat_antirecall_red_packet_parse(const char *xml) {
     return xml && red_packet::parse(xml).has_value();

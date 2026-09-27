@@ -422,7 +422,7 @@ final class AppState: ObservableObject {
     /// was actually moved aside (bounds any retry to a single extra attempt).
     @discardableResult
     private func quarantineStaleBuiltCLI(_ reportedSchemaVersion: Int) -> Bool {
-        guard reportedSchemaVersion != GUICLIProtocol.schemaVersion,
+        guard reportedSchemaVersion < GUICLIProtocol.schemaVersion,
               BundledPaths.usingBuiltFromSource else { return false }
         let stale = BundledPaths.builtDir.appendingPathComponent("wechat-antirecall")
         guard FileManager.default.isExecutableFile(atPath: stale.path) else { return false }

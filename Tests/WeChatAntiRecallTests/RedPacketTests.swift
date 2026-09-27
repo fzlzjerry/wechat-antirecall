@@ -106,8 +106,8 @@ final class RedPacketTests: XCTestCase {
     func testRuntimeMarkerMatchesRuntimeExport() {
         XCTAssertEqual(String(cString: wechat_antirecall_red_packet_runtime_version()),
                        RedPacketSettings.runtimeMarker)
-        XCTAssertTrue(RedPacketSettings.runtimeMarker.hasSuffix(":4"),
-                      "notify-only needs a fresh runtime; the marker must move past :3")
+        XCTAssertTrue(RedPacketSettings.runtimeMarker.hasSuffix(":5"),
+                      "notify-only needs a fresh runtime; the marker must move past the upstream :4")
     }
 
     func testPreferenceRoundTripPreservesWeChatSettings() throws {
@@ -143,7 +143,8 @@ final class RedPacketTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         let store = RedPacketPreferenceStore(
             preferences: RecallTipPreferenceStore(homeDirectory: folder, domain: "com.tencent.xinWeChat"))
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: store.preferenceFileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         // Settings written by the :3 runtime era carry no notifyOnly key.
         let legacy: [String: Any] = ["WeChatAntiRecall_RedPacket": ["enabled": true, "delayMilliseconds": 250]]
         try PropertyListSerialization.data(fromPropertyList: legacy, format: .binary, options: 0)

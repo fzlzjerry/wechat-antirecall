@@ -10,7 +10,7 @@ import Foundation
 // with an older GUI (or vice versa) is detectable.
 
 // v2: red-packet settings gained `notifyOnly` (notify-only mode) and the runtime
-// marker moved to WeChatAntiRecallRedPacket:4.
+// marker moved to WeChatAntiRecallRedPacket:5.
 
 let jsonSchemaVersion = 2
 
