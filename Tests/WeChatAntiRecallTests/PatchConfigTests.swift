@@ -660,6 +660,25 @@ final class PatchConfigTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("270100"))
     }
 
+    func testBuild270102SupportsStaticRecallPatchesOnly() throws {
+        let configs = try loadPatchConfigs()
+        let config = try XCTUnwrap(configs.first { $0.version == "270102" })
+
+        XCTAssertEqual(config.targets.map(\.identifier), ["revoke", "revoke-tip"])
+
+        let revoke = try XCTUnwrap(config.targets.first { $0.identifier == "revoke" })
+        XCTAssertEqual(revoke.entries.map(\.address), [0x4bc53d8])
+        XCTAssertEqual(revoke.entries[0].expectedBytes, [try Data(hexString: "40100034")])
+        XCTAssertEqual(revoke.entries[0].patchBytes, try Data(hexString: "82000014"))
+
+        let revokeTip = try XCTUnwrap(config.targets.first { $0.identifier == "revoke-tip" })
+        XCTAssertEqual(revokeTip.entries.map(\.address), [0x4bc53d8, 0x4bc5b78])
+        XCTAssertEqual(revokeTip.entries[1].expectedBytes, [try Data(hexString: "60E600F9")])
+        XCTAssertEqual(revokeTip.entries[1].patchBytes, try Data(hexString: "7FE600F9"))
+
+        XCTAssertFalse(RuntimeTipInstaller.supportedBuildVersions.contains("270102"))
+    }
+
     private func loadPatchConfigs() throws -> [VersionConfig] {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("patches.json")
