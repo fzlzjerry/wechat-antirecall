@@ -69,6 +69,21 @@ final class JSONOutputTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(report.catalog.first { $0.build == "270102" }).runtimeTipSupported)
     }
 
+    func testVersionsReportAdvertisesBuild270132Capabilities() throws {
+        let configs = try loadPatchConfigs()
+        let report = VersionsReport(appInfo: appInfo(buildVersion: "270132"), configs: configs)
+
+        XCTAssertTrue(report.supported)
+        XCTAssertTrue(report.runtimeTipSupported)
+        XCTAssertTrue(report.features.silent)
+        XCTAssertTrue(report.features.tip)
+        XCTAssertTrue(report.features.blockUpdate)
+        XCTAssertTrue(report.features.customTip)
+        XCTAssertFalse(report.features.multiInstance)
+        XCTAssertEqual(report.installedBuildTargets, ["revoke", "revoke-tip", "update", "runtime-tip"])
+        XCTAssertTrue(try XCTUnwrap(report.catalog.first { $0.build == "270132" }).runtimeTipSupported)
+    }
+
     func testVersionsReportForUnsupportedBuild() throws {
         let configs = try loadPatchConfigs()
         let report = VersionsReport(appInfo: appInfo(buildVersion: "999999"), configs: configs)
