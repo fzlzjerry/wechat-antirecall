@@ -31,7 +31,7 @@ constexpr size_t revokeContentCacheMaximumCount = 512;
 constexpr size_t revokeContentPreviewMaximumBytes = 240;
 constexpr size_t arm64StubLength = 16;
 
-// Call-site analysis through build 270100 confirms this function takes exactly
+// Call-site analysis through build 270102 confirms this function takes exactly
 // three arguments. The second argument is the raw XML and the wrapper has already
 // copied it into the build-specific handlerOutput replaceMsg field.
 using ParseRevokeXML = bool (*)(void *, std::string *, void *);
@@ -69,7 +69,7 @@ struct InlineRevokeHookConfig {
 };
 
 // The revoke XML handler is selected only for message-extension types 71/72, so it
-// cannot observe ordinary text/media messages. Verified builds from 269340 through 270100 carry
+// cannot observe ordinary text/media messages. Verified builds from 269340 through 270102 carry
 // a second inline hook at the common Message finalizer. Call-path analysis shows every incoming
 // Message reaches this function after serverId/msgType/content have been populated
 // and immediately before its type-specific extension parser is dispatched.
@@ -240,6 +240,11 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // guard and +0xA10 newmsgid store, with fields +0x1C8/+0x1D0. __DATA
     // slack after __common is only 0x58 bytes, so SLOT is 0xA367FF0.
     {"270100", 0x4bc4d34, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4bc4d40, 0x1c8, 0x1d0},
+    // 270102 (WeChat 4.1.15.22): IDA and LC_FUNCTION_STARTS confirm parser
+    // 0x4BC5168..0x4BC6284. The +0x270 guard, +0xA10 newmsgid store and
+    // fields +0x1C8/+0x1D0 remain unchanged. SLOT 0xA367FF0 is independently
+    // verified in the 0x58-byte __DATA tail slack after __common.
+    {"270102", 0x4bc5168, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4bc5174, 0x1c8, 0x1d0},
 };
 
 constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
@@ -421,6 +426,19 @@ constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
         0x4b61808,
         {0x39496008, 0x7100051F, 0x7A400820},
         0x4b61814,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 270102: the network constructor at 0x4B608E4 writes serverId +0xF8
+    // at 0x4B609F8 and content +0x130 at 0x4B60A1C; helper 0x4B615B0
+    // writes msgType +0x0C before the unconditional finalizer call at
+    // 0x4B60D88. The early-return flag remains +0x258; SLOT is 0xA367FF8.
+    {
+        "270102",
+        0x4b61c3c,
+        {0x39496008, 0x7100051F, 0x7A400820},
+        0x4b61c48,
         0x0f8,
         0x00c,
         0x130,

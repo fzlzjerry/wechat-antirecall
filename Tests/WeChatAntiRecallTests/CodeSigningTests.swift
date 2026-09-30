@@ -52,13 +52,36 @@ final class CodeSigningTests: XCTestCase {
         )
     }
 
-    private func makeSignedAppFixture() throws -> SignedAppFixture {
+    func testResignPreservesExtendedAttributeSignaturesWhileRemovingQuarantine() throws {
+        let fixture = try makeSignedAppFixture(includeSignedResource: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", fixture.appURL.path]), 0)
+        XCTAssertEqual(try run("/usr/bin/xattr", ["-p", "com.apple.cs.CodeDirectory", fixture.signedResourceURL.path]), 0)
+        for url in [fixture.appURL, fixture.signedResourceURL] {
+            XCTAssertEqual(try run("/usr/bin/xattr", ["-w", "com.apple.quarantine", "0081;00000000;Fixture;", url.path]), 0)
+        }
+
+        try resign(appURL: fixture.appURL, nestedBinaries: [fixture.executableURL, fixture.helperExecutableURL])
+
+        // Non-Mach-O code in Frameworks stores its signature in com.apple.cs.* xattrs.
+        // Clearing every xattr after signing makes deep verification fail immediately.
+        XCTAssertEqual(try run("/usr/bin/codesign", ["--verify", "--strict", fixture.signedResourceURL.path]), 0)
+        XCTAssertEqual(try run("/usr/bin/codesign", ["--verify", "--deep", "--strict", fixture.appURL.path]), 0)
+        XCTAssertEqual(try run("/usr/bin/xattr", ["-p", "com.apple.cs.CodeDirectory", fixture.signedResourceURL.path]), 0)
+        for url in [fixture.appURL, fixture.signedResourceURL] {
+            XCTAssertNotEqual(try run("/usr/bin/xattr", ["-p", "com.apple.quarantine", url.path]), 0)
+        }
+    }
+
+    private func makeSignedAppFixture(includeSignedResource: Bool = false) throws -> SignedAppFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("wechat-antirecall-codesign-tests-\(UUID().uuidString)", isDirectory: true)
         let appURL = root.appendingPathComponent("Fixture.app", isDirectory: true)
         let executableURL = appURL.appendingPathComponent("Contents/MacOS/Fixture")
         let helperAppURL = appURL.appendingPathComponent("Contents/Helpers/Helper.app", isDirectory: true)
         let helperExecutableURL = helperAppURL.appendingPathComponent("Contents/MacOS/Helper")
+        let signedResourceURL = helperAppURL.appendingPathComponent("Contents/Frameworks/vk_swiftshader_icd.json")
         let emptyXPCURL = appURL.appendingPathComponent("Contents/XPCServices/Empty.xpc", isDirectory: true)
         let emptyXPCExecutableURL = emptyXPCURL.appendingPathComponent("Contents/MacOS/Empty")
 
@@ -133,6 +156,15 @@ final class CodeSigningTests: XCTestCase {
             to: helperEntitlementsURL
         )
 
+        if includeSignedResource {
+            try FileManager.default.createDirectory(
+                at: signedResourceURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("{\"file_format_version\":\"1.0.0\"}\n".utf8).write(to: signedResourceURL)
+            XCTAssertEqual(try run("/usr/bin/codesign", ["--force", "--sign", "-", signedResourceURL.path]), 0)
+        }
+
         XCTAssertEqual(
             try run(
                 "/usr/bin/codesign",
@@ -169,6 +201,7 @@ final class CodeSigningTests: XCTestCase {
             executableURL: executableURL,
             helperAppURL: helperAppURL,
             helperExecutableURL: helperExecutableURL,
+            signedResourceURL: signedResourceURL,
             emptyXPCURL: emptyXPCURL
         )
     }
@@ -221,5 +254,6 @@ private struct SignedAppFixture {
     let executableURL: URL
     let helperAppURL: URL
     let helperExecutableURL: URL
+    let signedResourceURL: URL
     let emptyXPCURL: URL
 }

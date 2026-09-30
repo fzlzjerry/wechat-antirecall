@@ -1624,7 +1624,7 @@ struct RuntimeTipInstaller {
     static let installName = "@loader_path/\(dylibFileName)"
     static let hostBinaryPath = "Contents/Resources/wechat.dylib"
     static let destinationDylibPath = "Contents/Resources/\(dylibFileName)"
-    static let supportedBuildVersions = ["268597", "268599", "268601", "268602", "268831", "268849", "268850", "268851", "269077", "269079", "269110", "269332", "269333", "269334", "269338", "269340", "269341", "269574", "269575", "269576", "269577", "269578", "269579", "269619", "269624", "269628", "270090", "270100"]
+    static let supportedBuildVersions = ["268597", "268599", "268601", "268602", "268831", "268849", "268850", "268851", "269077", "269079", "269110", "269332", "269333", "269334", "269338", "269340", "269341", "269574", "269575", "269576", "269577", "269578", "269579", "269619", "269624", "269628", "270090", "270100", "270102"]
 
     let sourceDylibURL: URL
     let destinationDylibURL: URL
@@ -2079,16 +2079,17 @@ func resign(
         }
     }
 
+    // Remove quarantine only: nested non-Mach-O code (e.g. vk_swiftshader_icd.json)
+    // stores its signature in com.apple.cs.* xattrs. Clearing all attributes destroys
+    // those signatures. Leave provenance and all other metadata intact; quarantine
+    // removal remains best-effort when macOS does not permit changing an attribute.
+    _ = runProcessStatus("/usr/bin/xattr", ["-dr", "com.apple.quarantine", appURL.path])
+
+    // Verify the final state after all bundle mutations, including quarantine cleanup.
     try runProcess(
         "/usr/bin/codesign",
         ["--verify", "--deep", "--strict", "--verbose=2", appURL.path]
     )
-
-    // Best-effort quarantine strip so the re-signed app still launches. The bundle is already
-    // validly signed above, so this must not fail the install: on macOS 15+ many files carry an
-    // OS-protected `com.apple.provenance` xattr that xattr(1) cannot remove even as the owner
-    // (EPERM), which previously aborted an otherwise-successful install.
-    _ = runProcessStatus("/usr/bin/xattr", ["-cr", appURL.path])
 }
 
 private func signMachO(

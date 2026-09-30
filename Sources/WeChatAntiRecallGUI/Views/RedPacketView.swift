@@ -24,7 +24,9 @@ struct RedPacketView: View {
         VStack(alignment: .leading, spacing: Theme.gap) {
             HStack {
                 Text("红包助手").font(.title2.weight(.semibold))
-                StatusPill(tone: .neutral, text: "已实测", systemImage: "checkmark.circle")
+                StatusPill(tone: .neutral,
+                           text: controller.supported ? "已适配" : "待适配",
+                           systemImage: controller.supported ? "checkmark.circle" : "info.circle")
             }
             Text(modeDescription)
                 .foregroundStyle(.secondary)
@@ -43,8 +45,8 @@ struct RedPacketView: View {
             Card {
                 VStack(alignment: .leading, spacing: 12) {
                     SectionLabel(text: "当前支持")
-                    Text("微信 4.1.13（269624 / 269628）及 4.1.15（270090 / 270100）")
-                    Text("用户已在微信 4.1.15.10（270090）实测确认普通红包自动领取可用。270100 已完成静态地址核对，领取结果仍以微信显示为准。")
+                    Text("微信 4.1.13（269624 / 269628）及 4.1.15（270090 / 270100 / 270102）")
+                    Text("用户已在微信 4.1.15.10（270090）实测确认普通红包自动领取可用。270100、270102 已完成静态地址核对，领取结果仍以微信显示为准。")
                         .font(.callout).foregroundStyle(.secondary)
                     if controller.supported && !runtimeInstalled {
                         Text("需要更新本工具的运行组件，并使用自定义撤回提示模式。安装前请完全退出微信。")

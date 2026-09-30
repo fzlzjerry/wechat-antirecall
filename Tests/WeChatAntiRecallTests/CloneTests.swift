@@ -249,7 +249,7 @@ final class CloneTests: XCTestCase {
     }
 
     func testInstallerCopiesCloneWithoutChangingSourcePlist() throws {
-        let fixture = try makeFakeWechatApp()
+        let fixture = try makeFakeWechatApp(shortVersion: "4.1.15", buildVersion: "270102")
         defer {
             try? FileManager.default.removeItem(at: fixture.root)
         }
@@ -271,6 +271,8 @@ final class CloneTests: XCTestCase {
         let clonePlist = try readPlist(clonePlistURL)
         XCTAssertEqual(clonePlist["CFBundleIdentifier"] as? String, "com.tencent.xinWeChat.antirecall.clone1")
         XCTAssertEqual(clonePlist["CFBundleExecutable"] as? String, "WeChat")
+        XCTAssertEqual(clonePlist["CFBundleShortVersionString"] as? String, "4.1.15")
+        XCTAssertEqual(clonePlist["CFBundleVersion"] as? String, "270102")
         XCTAssertNil(clonePlist["CFBundleURLTypes"])
     }
 
@@ -296,7 +298,10 @@ final class CloneTests: XCTestCase {
         }
     }
 
-    private func makeFakeWechatApp() throws -> (
+    private func makeFakeWechatApp(
+        shortVersion: String = "4.1.9",
+        buildVersion: String = "268602"
+    ) throws -> (
         root: URL,
         appURL: URL,
         infoPlistURL: URL,
@@ -320,8 +325,8 @@ final class CloneTests: XCTestCase {
             "CFBundleName": "WeChat",
             "CFBundleDisplayName": "WeChat",
             "CFBundleGetInfoString": "WeChat",
-            "CFBundleShortVersionString": "4.1.9",
-            "CFBundleVersion": "268602",
+            "CFBundleShortVersionString": shortVersion,
+            "CFBundleVersion": buildVersion,
             "CFBundleURLTypes": [
                 [
                     "CFBundleURLName": "com.tencent.xinWeChat",
@@ -339,8 +344,8 @@ final class CloneTests: XCTestCase {
             AppInfo(
                 appURL: appURL,
                 executableURL: macOSURL.appendingPathComponent("WeChat"),
-                shortVersion: "4.1.9",
-                buildVersion: "268602",
+                shortVersion: shortVersion,
+                buildVersion: buildVersion,
                 bundleIdentifier: "com.tencent.xinWeChat"
             )
         )

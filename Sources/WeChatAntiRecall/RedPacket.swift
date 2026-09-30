@@ -2,8 +2,8 @@ import Foundation
 
 struct RedPacketSettings: Codable, Equatable {
     static let preferenceKey = "WeChatAntiRecall_RedPacket"
-    static let supportedBuilds: Set<String> = ["269624", "269628", "270090", "270100"]
-    static let runtimeMarker = "WeChatAntiRecallRedPacket:5"
+    static let supportedBuilds: Set<String> = ["269624", "269628", "270090", "270100", "270102"]
+    static let runtimeMarker = "WeChatAntiRecallRedPacket:6"
     var enabled = false
     var delayMilliseconds = 500
     // true = 仅提醒：检测到红包只弹系统通知，不自动领取。
