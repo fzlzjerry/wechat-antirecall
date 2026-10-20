@@ -28,8 +28,10 @@ enum BundledPaths {
                 return current
             }
 
+            // Past the volume root some Foundation versions return "/..", "/../..", ...
+            // instead of "/" again, so an equality check alone would loop forever.
             let parent = current.deletingLastPathComponent()
-            if parent.path == current.path { return nil }
+            if parent.path == current.path || parent.path.count >= current.path.count { return nil }
             current = parent
         }
     }
