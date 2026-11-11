@@ -238,9 +238,22 @@ bool writeKeysFile(NSString *directory, NSData *payload) {
     return true;
 }
 
+// Scans and writes one snapshot to `directory` when the heap currently holds at
+// least one key. A zero-key scan (WeChat not logged in yet) must NOT count as a
+// write: it would throttle real scans for the whole success window and could
+// overwrite a good snapshot with an empty one.
+bool scanWriteSnapshot(NSString *directory) {
+    const auto keys = scanSelfMemory();
+    if (keys.empty()) return false;
+    NSData *payload = encodeKeys(keys, static_cast<uint64_t>(std::time(nullptr)));
+    if (payload == nil) return false;
+    return writeKeysFile(directory, payload);
+}
+
 // Runs on writerQueue. Rescans only when the user opted in and the throttle lets us:
-// a successful dump keeps the file fresh for ten minutes, a failed attempt is retried
-// at most once a minute, and a disabled setting costs nothing but a preference read.
+// a successful dump keeps the file fresh for ten minutes, a failed or empty attempt
+// is retried at most once a minute, and a disabled setting costs nothing but a
+// preference read.
 void scanAndWriteIfDue() {
     @autoreleasepool {
         const int64_t now = static_cast<int64_t>(std::time(nullptr));
@@ -252,10 +265,7 @@ void scanAndWriteIfDue() {
         }
         if (!exportEnabled()) return;
 
-        const auto keys = scanSelfMemory();
-        NSData *payload = encodeKeys(keys, static_cast<uint64_t>(now));
-        if (payload == nil) return;
-        if (writeKeysFile(productionDirectory(), payload)) {
+        if (scanWriteSnapshot(productionDirectory())) {
             std::lock_guard<std::mutex> lock(throttleMutex);
             lastSuccessAt = now;
         }
@@ -330,6 +340,16 @@ int wechat_antirecall_key_export_write_for_test(const char *directory, const cha
         if (directory == nullptr || json == nullptr) return 0;
         NSData *payload = [NSData dataWithBytes:json length:std::strlen(json)];
         return writeKeysFile(@(directory), payload) ? 1 : 0;
+    }
+}
+
+// Full scan-then-write decision against `directory`, skipping the preference gate
+// (the test host is not WeChat). Returns 1 only when a non-empty snapshot was
+// written; an empty scan must leave no file behind.
+int wechat_antirecall_key_export_scan_and_write_for_test(const char *directory) {
+    @autoreleasepool {
+        if (directory == nullptr) return 0;
+        return scanWriteSnapshot(@(directory)) ? 1 : 0;
     }
 }
 

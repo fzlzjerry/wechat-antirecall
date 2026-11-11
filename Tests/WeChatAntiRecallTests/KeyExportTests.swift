@@ -160,6 +160,32 @@ final class KeyExportTests: XCTestCase {
         XCTAssertEqual(leftovers, ["keys.json"])
     }
 
+    // MARK: - Empty scan must not count as a write
+
+    func testScanAndWriteSkipsEmptyScanAndWritesNonEmpty() throws {
+        let home = try makeHome()
+        let directory = try makeContainer(home: home)
+        // First pass: this process's heap holds no key pattern, so no file may appear.
+        wechat_antirecall_key_export_reset_throttle_for_test()
+        XCTAssertEqual(wechat_antirecall_key_export_scan_and_write_for_test(directory.path), 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("keys.json").path))
+
+        // Plant a live pattern, then the same call must write a non-empty snapshot.
+        let key = "fedcba9876543210" + String(repeating: "cd", count: 24)
+        let salt = String(repeating: "7", count: 32)
+        let blob = Array(pattern(key: key, salt: salt).utf8)
+        let storage = UnsafeMutablePointer<UInt8>.allocate(capacity: blob.count)
+        storage.initialize(from: blob, count: blob.count)
+        defer {
+            storage.deinitialize(count: blob.count)
+            storage.deallocate()
+        }
+        wechat_antirecall_key_export_reset_throttle_for_test()
+        XCTAssertEqual(wechat_antirecall_key_export_scan_and_write_for_test(directory.path), 1)
+        let written = try String(contentsOf: directory.appendingPathComponent("keys.json"), encoding: .utf8)
+        XCTAssertTrue(written.contains(key), "snapshot must contain the planted key")
+    }
+
     // MARK: - Preference gate
 
     func testEnabledForPlistRequiresStrictBoolean() throws {
@@ -200,6 +226,24 @@ final class KeyExportTests: XCTestCase {
         let home = try makeHome()
         let store = KeyExportFileStore(homeDirectory: home, domain: fixtureDomain)
         XCTAssertNil(try store.load())
+    }
+
+    func testFileStoreFallsBackToUnsandboxedHome() throws {
+        // A WeChat whose app-sandbox entitlement was stripped writes under the real
+        // home; the store must still find the snapshot when the container is empty.
+        let home = try makeHome()
+        let unsandboxed = home
+            .appendingPathComponent("Library/Application Support/WeChatAntiRecall", isDirectory: true)
+        try FileManager.default.createDirectory(at: unsandboxed, withIntermediateDirectories: true)
+        let payload = """
+        {"dumpedAt":1731000001,"keys":[{"key":"\(String(repeating: "ee", count: 32))","salt":"\(String(repeating: "11", count: 16))"}],"v":1}
+        """
+        try payload.data(using: .utf8)?
+            .write(to: unsandboxed.appendingPathComponent("keys.json"))
+        let store = KeyExportFileStore(homeDirectory: home, domain: fixtureDomain)
+        let file = try XCTUnwrap(try store.load())
+        XCTAssertEqual(file.dumpedAt, 1_731_000_001)
+        XCTAssertEqual(store.candidateURLs.count, 2)
     }
 
     func testFileStoreRejectsUnsupportedVersionAndCorruption() throws {
@@ -262,6 +306,36 @@ final class KeyExportTests: XCTestCase {
         XCTAssertEqual(try KeyExportDatabaseMatcher.readSalt(at: root.appendingPathComponent("wxid_fixture/db/plain.db")), nil)
         XCTAssertEqual(try KeyExportDatabaseMatcher.readSalt(at: root.appendingPathComponent("wxid_fixture/db/short.db")), nil)
         XCTAssertEqual(try KeyExportDatabaseMatcher.readSalt(at: root.appendingPathComponent("wxid_fixture/db/message_0.db")), encryptedSalt)
+    }
+
+    func testMatcherMergesContainerAndUnsandboxedRoots() throws {
+        let home = try makeHome()
+        // One encrypted database under the container root, another under ~/Documents
+        // (the unsandboxed WeChat layout); both must pair with their keys.
+        let containerSalt = String(repeating: "ab", count: 16)
+        let unsandboxedSalt = String(repeating: "99", count: 16)
+        let containerDirectory = home
+            .appendingPathComponent("Library/Containers/\(fixtureDomain)/Data/Documents/xwechat_files/wxid_a/db", isDirectory: true)
+        let unsandboxedDirectory = home
+            .appendingPathComponent("Documents/xwechat_files/wxid_b/db", isDirectory: true)
+        for (directory, salt) in [(containerDirectory, containerSalt), (unsandboxedDirectory, unsandboxedSalt)] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            var contents = saltBytes(salt)
+            contents.append(Data(repeating: 0x00, count: 64))
+            try contents.write(to: directory.appendingPathComponent("message_0.db"))
+        }
+
+        let matcher = KeyExportDatabaseMatcher(homeDirectory: home, bundleIdentifier: fixtureDomain)
+        let result = try matcher.match(keys: [
+            KeyExportKeyEntry(key: String(repeating: "12", count: 32), salt: containerSalt),
+            KeyExportKeyEntry(key: String(repeating: "34", count: 32), salt: unsandboxedSalt),
+        ])
+        XCTAssertEqual(result.matches, [
+            "wxid_a/db/message_0.db": String(repeating: "12", count: 32),
+            "wxid_b/db/message_0.db": String(repeating: "34", count: 32),
+        ])
+        XCTAssertTrue(result.unmatchedKeySalts.isEmpty)
+        XCTAssertEqual(result.encryptedDatabasesWithoutKey, 0)
     }
 
     // MARK: - Options

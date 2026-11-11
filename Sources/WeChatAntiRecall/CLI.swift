@@ -996,7 +996,7 @@ struct CLI {
             let matcher = KeyExportDatabaseMatcher(bundleIdentifier: info.bundleIdentifier)
             let result = try matcher.match(keys: file.keys)
             guard !result.matches.isEmpty else {
-                throw ToolError.usage("没有匹配到任何数据库文件。请确认微信数据目录存在：\(matcher.rootURL.path)。")
+                throw ToolError.usage("没有匹配到任何数据库文件。请确认微信数据目录存在（\(matcher.rootURL.path) 或 ~/Documents/xwechat_files）。")
             }
             // wx-cli all_keys.json layout: {"<db path>": {"enc_key": "<64 hex>"}}.
             let payload = try JSONSerialization.data(

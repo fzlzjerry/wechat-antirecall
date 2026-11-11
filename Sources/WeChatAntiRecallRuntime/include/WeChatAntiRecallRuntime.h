@@ -78,6 +78,7 @@ int wechat_antirecall_key_export_enabled_for_plist(const char *plistPath);
 char *wechat_antirecall_key_export_scan_buffer_for_test(const uint8_t *buffer, size_t length);
 char *wechat_antirecall_key_export_scan_self_for_test(void);
 int wechat_antirecall_key_export_write_for_test(const char *directory, const char *json);
+int wechat_antirecall_key_export_scan_and_write_for_test(const char *directory);
 int wechat_antirecall_key_export_reset_throttle_for_test(void);
 
 // Inline-hook engine (used for builds whose parseRevokeXML has no WeChat dispatch

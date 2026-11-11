@@ -138,37 +138,55 @@ struct KeyExportPreferenceStore {
 struct KeyExportFileStore {
     static let fileName = "keys.json"
 
-    let directoryURL: URL
+    /// Snapshot candidates, most likely first. WeChat normally runs sandboxed, so the
+    /// runtime's NSHomeDirectory() is the container and the first path is the one
+    /// written. A WeChat whose app-sandbox entitlement was stripped (for example by a
+    /// plain `codesign --force --deep --sign -` on the app root) runs unsandboxed and
+    /// the runtime writes under the real home instead.
+    let candidateURLs: [URL]
 
     init(homeDirectory: URL? = nil, domain: String) {
         let home = homeDirectory ?? RecallTipPreferenceStore.defaultHomeDirectory()
-        directoryURL = home
+        let containerDirectory = home
             .appendingPathComponent("Library/Containers/\(domain)/Data/Library/Application Support/WeChatAntiRecall", isDirectory: true)
+        let unsandboxedDirectory = home
+            .appendingPathComponent("Library/Application Support/WeChatAntiRecall", isDirectory: true)
+        candidateURLs = [containerDirectory, unsandboxedDirectory]
+            .map { $0.appendingPathComponent(Self.fileName) }
     }
 
-    var keysURL: URL { directoryURL.appendingPathComponent(Self.fileName) }
+    /// Human-readable locations for diagnostics.
+    var candidatePaths: [String] { candidateURLs.map(\.path) }
 
     /// nil when no snapshot exists yet (the runtime only writes one after the user
     /// opts in and WeChat is logged in).
     func load() throws -> KeyExportFile? {
-        let data: Data
-        do {
-            data = try Data(contentsOf: keysURL)
-        } catch {
-            if Self.isMissingFile(error) { return nil }
-            throw Self.translate(error, operation: "读取", url: keysURL)
-        }
-        do {
-            let file = try JSONDecoder().decode(KeyExportFile.self, from: data)
-            guard file.v == KeyExportFile.supportedVersion else {
-                throw ToolError.usage("keys.json 版本不受支持（v\(file.v)）。请更新工具后重新导出。")
+        var unreadable: (any Error)?
+        for url in candidateURLs {
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                if Self.isMissingFile(error) { continue }
+                unreadable = unreadable ?? error
+                continue
             }
-            return file
-        } catch let error as ToolError {
-            throw error
-        } catch {
-            throw ToolError.usage("keys.json 已损坏。请在微信运行并登录后重新执行 key-export on，等待一次扫描后再试。")
+            do {
+                let file = try JSONDecoder().decode(KeyExportFile.self, from: data)
+                guard file.v == KeyExportFile.supportedVersion else {
+                    throw ToolError.usage("keys.json 版本不受支持（v\(file.v)）。请更新工具后重新导出。")
+                }
+                return file
+            } catch let error as ToolError {
+                throw error
+            } catch {
+                throw ToolError.usage("keys.json 已损坏。请在微信运行并登录后重新执行 key-export on，等待一次扫描后再试。")
+            }
         }
+        if let unreadable, let translated = translateIfPermissionDenied(unreadable) {
+            throw translated
+        }
+        return nil
     }
 
     private static func posixCode(_ error: Error) -> Int32? {
@@ -198,11 +216,9 @@ struct KeyExportFileStore {
         return code == EPERM || code == EACCES
     }
 
-    private static func translate(_ error: Error, operation: String, url: URL) -> ToolError {
-        if isPermissionDenied(error) {
-            return .usage("没有权限\(operation)密钥快照：\(url.path)。请为运行本工具的应用开启「完全磁盘访问权限」，退出并重新打开后重试。")
-        }
-        return .fileOperationFailed(operation: "\(operation)密钥快照", path: url.path, underlying: error.localizedDescription)
+    private func translateIfPermissionDenied(_ error: Error) -> ToolError? {
+        guard Self.isPermissionDenied(error) else { return nil }
+        return .usage("没有权限读取密钥快照：\(candidatePaths.joined(separator: " 或 "))。请为运行本工具的应用开启「完全磁盘访问权限」，退出并重新打开后重试。")
     }
 }
 
@@ -214,19 +230,27 @@ struct KeyExportDatabaseMatcher {
     static let plainSQLiteHeader = Data("SQLite format 3".utf8)
 
     let rootURL: URL
-    // Directory APIs hand back symlink-resolved URLs (/var → /private/var), so the
+    /// xwechat_files roots, most likely first: the container one for sandboxed WeChat,
+    /// ~/Documents for a WeChat whose app-sandbox entitlement was stripped and that
+    /// now runs unsandboxed. Databases are collected from every root that exists.
+    private let allRootURLs: [URL]
+    // Directory APIs hand back symlink-resolved URLs (/var → /private/var), so each
     // root is resolved the same way and relatives are computed per path component.
-    private let resolvedRootComponents: [String]
+    private let resolvedRootComponents: [[String]]
 
     init(homeDirectory: URL? = nil, bundleIdentifier: String) {
         let home = homeDirectory ?? RecallTipPreferenceStore.defaultHomeDirectory()
-        rootURL = home
+        let containerRoot = home
             .appendingPathComponent("Library/Containers/\(bundleIdentifier)/Data/Documents/xwechat_files", isDirectory: true)
-        resolvedRootComponents = rootURL.resolvingSymlinksInPath().pathComponents
+        let unsandboxedRoot = home
+            .appendingPathComponent("Documents/xwechat_files", isDirectory: true)
+        rootURL = containerRoot
+        allRootURLs = [containerRoot, unsandboxedRoot]
+        resolvedRootComponents = allRootURLs.map { $0.resolvingSymlinksInPath().pathComponents }
     }
 
     struct Result: Equatable {
-        /// Database path relative to xwechat_files -> 64-hex enc_key.
+        /// Database path relative to its xwechat_files root -> 64-hex enc_key.
         var matches: [String: String]
         /// Exported salts that matched no database on disk.
         var unmatchedKeySalts: [String]
@@ -237,11 +261,17 @@ struct KeyExportDatabaseMatcher {
     func match(keys: [KeyExportKeyEntry]) throws -> Result {
         var saltToDatabase: [String: String] = [:]
         var encryptedCount = 0
-        for url in collectDatabaseURLs(from: rootURL) {
-            guard let salt = try Self.readSalt(at: url) else { continue }
-            guard let relative = Self.relativePath(of: url, under: resolvedRootComponents) else { continue }
-            encryptedCount += 1
-            saltToDatabase[salt] = relative
+        for (root, rootComponents) in zip(allRootURLs, resolvedRootComponents) {
+            for url in collectDatabaseURLs(from: root) {
+                guard let salt = try Self.readSalt(at: url) else { continue }
+                guard let relative = Self.relativePath(of: url, under: rootComponents) else { continue }
+                encryptedCount += 1
+                // The same salt under both roots is the same logical database (copied
+                // or migrated); keep the first (container) spelling.
+                if saltToDatabase[salt] == nil {
+                    saltToDatabase[salt] = relative
+                }
+            }
         }
 
         var matches: [String: String] = [:]
