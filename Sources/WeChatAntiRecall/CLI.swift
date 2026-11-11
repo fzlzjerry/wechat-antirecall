@@ -629,6 +629,8 @@ struct CLI {
             try redPacket(rest)
         case "recall-log":
             try recallLog(rest)
+        case "key-export":
+            try keyExport(rest)
         case "keyword-alert":
             try keywordAlert(rest)
         case "window-privacy":
@@ -954,6 +956,128 @@ struct CLI {
         }
     }
 
+    private func keyExport(_ arguments: [String]) throws {
+        let options = try KeyExportOptions(arguments)
+        let info = try readAppInfo(appPath: options.appPath)
+        let files = KeyExportFileStore(domain: info.bundleIdentifier)
+
+        if options.action == .list {
+            guard let file = try files.load() else {
+                if options.json {
+                    JSONOutput.emit(KeyExportListReport(
+                        schemaVersion: jsonSchemaVersion, dumpedAt: 0, keys: []))
+                } else {
+                    print("还没有密钥快照。请先 key-export on，并确认微信正在运行且已登录（最多约 30 秒后生成）。")
+                }
+                return
+            }
+            if options.json {
+                JSONOutput.emit(KeyExportListReport(
+                    schemaVersion: jsonSchemaVersion, dumpedAt: file.dumpedAt, keys: file.keys))
+            } else {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                let time = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(file.dumpedAt)))
+                print("快照生成于 \(time)，共 \(file.keys.count) 个密钥：")
+                for (index, entry) in file.keys.enumerated() {
+                    print("\(index + 1). key=\(entry.key) salt=\(entry.salt)")
+                }
+            }
+            return
+        }
+
+        if options.action == .export {
+            guard let file = try files.load() else {
+                throw ToolError.usage("还没有密钥快照。请先 key-export on，确认微信已登录并等待约 30 秒后再导出。")
+            }
+            guard !file.keys.isEmpty else {
+                throw ToolError.usage("密钥快照为空：微信可能尚未登录。请登录后等待下一次扫描再导出。")
+            }
+            let matcher = KeyExportDatabaseMatcher(bundleIdentifier: info.bundleIdentifier)
+            let result = try matcher.match(keys: file.keys)
+            guard !result.matches.isEmpty else {
+                throw ToolError.usage("没有匹配到任何数据库文件。请确认微信数据目录存在：\(matcher.rootURL.path)。")
+            }
+            // wx-cli all_keys.json layout: {"<db path>": {"enc_key": "<64 hex>"}}.
+            let payload = try JSONSerialization.data(
+                withJSONObject: result.matches.mapValues { ["enc_key": $0] },
+                options: [.prettyPrinted, .sortedKeys])
+            let outputURL = try options.resolvedOutputURL()
+            do {
+                try FileManager.default.createDirectory(
+                    at: outputURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700])
+                try payload.write(to: outputURL, options: .atomic)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: outputURL.path)
+            } catch {
+                throw ToolError.fileOperationFailed(
+                    operation: "写入导出文件", path: outputURL.path,
+                    underlying: error.localizedDescription)
+            }
+            if options.json {
+                JSONOutput.emit(KeyExportExportReport(
+                    schemaVersion: jsonSchemaVersion, output: outputURL.path,
+                    matchedDatabases: result.matches.keys.sorted(),
+                    unmatchedKeySalts: result.unmatchedKeySalts,
+                    encryptedDatabasesWithoutKey: result.encryptedDatabasesWithoutKey))
+            } else {
+                print("已写入 \(outputURL.path)：匹配 \(result.matches.count) 个数据库。")
+                if !result.unmatchedKeySalts.isEmpty {
+                    print("\(result.unmatchedKeySalts.count) 个密钥没有对应的数据库文件（可能是其他账号或已删除的库）。")
+                }
+                if result.encryptedDatabasesWithoutKey > 0 {
+                    print("\(result.encryptedDatabasesWithoutKey) 个加密数据库没有对应密钥（切换账号后重新登录即可覆盖）。")
+                }
+            }
+            return
+        }
+
+        let store = KeyExportPreferenceStore(
+            preferences: RecallTipPreferenceStore(domain: info.bundleIdentifier))
+        let runtimeData = try? Data(
+            contentsOf: info.appURL.appendingPathComponent(RuntimeTipInstaller.destinationDylibPath),
+            options: .mappedIfSafe)
+        let runtimeAvailable = runtimeData?.range(of: Data(KeyExportSettings.runtimeMarker.utf8)) != nil
+        // Turning the export off must stay possible even when the stored value is damaged.
+        var settings = options.action == .off ? ((try? store.load()) ?? KeyExportSettings()) : try store.load()
+        switch options.action {
+        case .on:
+            guard runtimeAvailable else {
+                throw ToolError.usage("请先安装或更新包含密钥导出的自定义提示运行时，再开启此设置。")
+            }
+            settings.enabled = true
+            try store.save(settings)
+        case .off:
+            settings.enabled = false
+            try store.save(settings)
+        case .get, .list, .export:
+            break
+        }
+
+        // The snapshot is informational; a read failure (no Full Disk Access) must not
+        // hide the settings.
+        let snapshot = try? files.load()
+        if options.json {
+            JSONOutput.emit(KeyExportReport(
+                schemaVersion: jsonSchemaVersion, settings: settings, build: info.buildVersion,
+                runtimeAvailable: runtimeAvailable,
+                keyCount: snapshot?.keys.count, dumpedAt: snapshot?.dumpedAt))
+        } else {
+            print("密钥导出：\(settings.enabled ? "已开启" : "已关闭")")
+            if let snapshot {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                let time = formatter.string(from: Date(timeIntervalSince1970: TimeInterval(snapshot.dumpedAt)))
+                print("快照：\(snapshot.keys.count) 个密钥，生成于 \(time)。")
+            } else {
+                print("快照：还没有（开启并登录微信后最多约 30 秒生成）。")
+            }
+            print("需要本版本的自定义提示运行时。keys.json 含数据库密钥，请像保管凭据一样保管。")
+        }
+    }
+
     private func keywordAlert(_ arguments: [String]) throws {
         let options = try KeywordAlertOptions(arguments)
         let info = try readAppInfo(appPath: options.appPath)
@@ -1185,6 +1309,13 @@ struct CLI {
           apps' screenshots (NSWindow sharingType none). It needs no per-build address.
           recall-log on keeps a local list of intercepted recalls (who, when, preview) in the
           WeChat container. It is off by default; clear deletes the stored entries.
+          wechat-antirecall key-export get|on|off|list|export [--app /Applications/WeChat.app] [--json]
+          wechat-antirecall key-export export [--output ~/.wx-cli/all_keys.json] [--app ...] [--json]
+          key-export on makes the runtime scan WeChat's own heap for its SQLCipher raw keys
+          (x'<key><salt>') and snapshot them to keys.json in the WeChat container, replacing
+          the re-sign + memory-scan dance database tools otherwise need. export pairs each
+          key with its database file by salt and writes wx-cli's all_keys.json. keys.json
+          contains live database keys: treat it like any other credential.
 
         Notes:
           install only patches versions present in patches.json.

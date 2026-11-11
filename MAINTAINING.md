@@ -160,6 +160,21 @@
 
 ---
 
+## 密钥导出（key-export）
+
+默认关闭的本地密钥快照，**不挂任何 hook、不新增任何每构建地址**——模式匹配独立于微信版本，微信更新后只要密钥仍是 `x'…'` 形态就继续工作。
+
+- **动机**：数据库工具（wx-cli 等）通常用 `task_for_pid` 扫微信内存提取 SQLCipher raw key，这要求微信是 ad-hoc 签名并带来 TCC/重签副作用（见 wx-cli 的 macOS 权限指南）。本 runtime 已在微信进程内，扫 `mach_task_self()` 零权限。
+- **触发**：`KeyExport.mm` 自己的 constructor 起一个 30 秒间隔的 dispatch timer（leeway 5 秒）。每次 fire 在专用串行队列上检查节流（成功后 10 分钟、尝试后 60 秒内跳过）→ 读偏好开关（`WeChatAntiRecall_KeyExport` = `{enabled: Bool}`，严格布尔，与 recall-log 同一条 CFPreferences 路径）→ 扫描。constructor 只注册 timer，不碰微信内部状态，所以不受加载时序影响（对比 MAINTAINING 2026-09-13 的 constructor 教训）。
+- **扫描**：`mach_vm_region(mach_task_self())` 枚举 RW 区域，`mach_vm_read` 按 2 MiB 分块（保留 99 字节全模式重叠防跨块），匹配 `x'` + 96 个 hex + `'`（64 key + 32 salt），小写化、按 key+salt 去重。与 wx-cli `scanner/macos.rs` 的 matcher 语义一致。`VM_REGION_BASIC_INFO_COUNT_64` 硬编码 9（历史坑，不能 sizeof）。
+- **文件**：`<容器>/Library/Application Support/WeChatAntiRecall/keys.json`（目录 0700、临时文件 0600 + `O_NOFOLLOW`，写完 `rename` 原子替换）。格式 `{"v":1,"dumpedAt":<unix>,"keys":[{"key","salt"}]}`。快照是覆盖写不是追加，读取端要么看到旧快照要么看到新的。
+- **CLI**：`key-export get|on|off|list|export`。`export` 在 CLI 侧做 salt→db 配对：递归扫 `~/Library/Containers/<bundle id>/Data/Documents/xwechat_files` 下 `.db` 前 16 字节 salt（`SQLite format 3` 开头的明文库跳过），生成 wx-cli 的 `all_keys.json`（`{"<相对路径>":{"enc_key":…}}`，默认 `~/.wx-cli/all_keys.json`，0600）。**相对路径用双方 `resolvingSymlinksInPath` 后的 pathComponents 前缀比较计算**——FileManager 目录 API 返回解析了 symlink 的 URL（`/var → /private/var`），字符串 `dropFirst` 会错位（`/tmp` 测试环境实测踩坑）。
+- **运行时标记**：`WeChatAntiRecallKeyExport:1`（`wechat_antirecall_key_export_runtime_version`），CLI 搜索已安装 dylib 判断 `runtimeAvailable`。
+- **安全边界**：密钥只在用户自己的设备上、用户显式开启后导出；`keys.json`/`all_keys.json` 等价于明文凭据（README 已注明）。扫描只读自身进程内存，写只落容器内目录。
+- **测试**：`KeyExportTests` 覆盖 pattern 匹配（大小写、非法 hex、引号、去重、垃圾嵌入、2 MiB 边界）、**真实 mach 路径端到端**（测试进程堆上植入 pattern，`scan_self_for_test` 必须扫到）、原子写与权限、严格布尔设置、CLI 文件解析、salt 配对（明文/截断跳过、symlink 相对路径）、选项解析。
+
+---
+
 ## 关键词提醒（keyword-alert）
 
 默认关闭的本地通知，挂在**通用 Message 终结器** hook 上（`hookedFinalizeMessage` 在原终结器和红包观察之后调用 `wechat_antirecall_keyword_alert_observe`），**不新增任何每构建地址**。

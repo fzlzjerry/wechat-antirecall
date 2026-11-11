@@ -196,6 +196,26 @@
 - 你自己撤回的消息不会被记录。
 - 日志最多保留约 4 MB（两个文件），超出后丢弃最旧的一半。可以随时在页面里「清空」。
 
+### 密钥导出（CLI）
+
+默认关闭。微信 4.x 用 SQLCipher 加密本地聊天数据库，密钥以 `x'<密钥><盐>'` 的形式缓存在微信进程自己的内存里。开启后，运行组件会**在微信进程内部**扫描自己的内存并把密钥快照写到微信容器的 `keys.json`——不需要重签微信、不需要 sudo，也不需要给任何工具授予开发者工具或完全磁盘之外的权限。
+
+适合配合 [wx-cli](https://github.com/Steady775/wx-cli) 这类本地读取自己聊天记录的命令行工具：`key-export export` 会把每个密钥按盐值配对到具体的数据库文件，直接生成 wx-cli 的 `~/.wx-cli/all_keys.json`，之后 `wx sessions` / `wx history` 照常使用。
+
+```bash
+swift run -c release wechat-antirecall key-export on    # 需已安装含此组件的运行时
+# 等微信运行并登录后最多约 30 秒生成快照
+swift run -c release wechat-antirecall key-export list
+swift run -c release wechat-antirecall key-export export   # 写 ~/.wx-cli/all_keys.json
+swift run -c release wechat-antirecall key-export export --output /其他/路径.json
+```
+
+注意事项：
+
+- 密钥在登录后才会出现在内存里；快照每 10 分钟自动刷新一次（期间最多 30 秒后首次生成）。切换账号后重新登录即可覆盖。
+- **`keys.json` 与导出文件包含可用解密全部本地聊天记录的密钥，请像保管密码一样保管**；不再需要时删除对应文件或 `key-export off`。
+- 快照存放在微信容器内（`~/Library/Containers/<bundle id>/Data/Library/Application Support/WeChatAntiRecall/keys.json`），读取和导出需要终端具备「完全磁盘访问权限」。
+
 ### 恢复 / 卸载
 
 每次安装前，工具都会把原文件保存在微信 App 内部。需要恢复时：
@@ -485,6 +505,18 @@ swift run -c release wechat-antirecall recall-log clear --app /Applications/WeCh
 ```
 
 `on` 需要已安装包含撤回记录的自定义提示运行时（`get --json` 的 `runtimeAvailable` 为 `true`），开启后重启微信生效。`list` 最新的在前，`--limit` 取 1–1000，默认 200。读取日志需要终端有完全磁盘访问权限；`get` 在读不到日志时 `entryCount` 为空，但设置仍然可用。
+
+### 密钥导出设置
+
+```bash
+swift run -c release wechat-antirecall key-export on --app /Applications/WeChat.app
+swift run -c release wechat-antirecall key-export list --app /Applications/WeChat.app
+swift run -c release wechat-antirecall key-export get --app /Applications/WeChat.app --json
+swift run -c release wechat-antirecall key-export export --output ~/.wx-cli/all_keys.json --app /Applications/WeChat.app
+swift run -c release wechat-antirecall key-export off --app /Applications/WeChat.app
+```
+
+`on` 需要已安装包含密钥导出的自定义提示运行时（`get --json` 的 `runtimeAvailable` 为 `true`）。开启后运行组件最多 30 秒写出第一份密钥快照（微信需已登录），每 10 分钟自动刷新。`export` 按盐值把密钥配对到 `xwechat_files` 下的数据库文件，生成 wx-cli 的 `all_keys.json`（默认 `~/.wx-cli/all_keys.json`，0600 权限）。读取快照需要终端有完全磁盘访问权限。
 
 ### 关键词提醒设置
 
