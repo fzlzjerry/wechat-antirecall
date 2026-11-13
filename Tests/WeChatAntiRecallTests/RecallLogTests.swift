@@ -61,7 +61,7 @@ final class RecallLogTests: XCTestCase {
     func testRuntimeMarkerMatchesRuntimeExport() {
         XCTAssertEqual(String(cString: wechat_antirecall_recall_log_runtime_version()),
                        RecallLogSettings.runtimeMarker)
-        XCTAssertEqual(RecallLogSettings.runtimeMarker, "WeChatAntiRecallRecallLog:1")
+        XCTAssertEqual(RecallLogSettings.runtimeMarker, "WeChatAntiRecallRecallLog:2")
     }
 
     func testEncodesRevokeFieldsAndUnknownContentAsNull() throws {

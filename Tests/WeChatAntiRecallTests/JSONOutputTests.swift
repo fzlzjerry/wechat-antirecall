@@ -114,6 +114,21 @@ final class JSONOutputTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(report.catalog.first { $0.build == "270135" }).runtimeTipSupported)
     }
 
+    func testVersionsReportAdvertisesWeChat42Capabilities() throws {
+        let configs = try loadPatchConfigs()
+        for build in ["270352", "270390"] {
+            let report = VersionsReport(appInfo: appInfo(buildVersion: build), configs: configs)
+            XCTAssertTrue(report.supported, build)
+            XCTAssertTrue(report.runtimeTipSupported, build)
+            XCTAssertTrue(report.features.silent, build)
+            XCTAssertTrue(report.features.tip, build)
+            XCTAssertTrue(report.features.blockUpdate, build)
+            XCTAssertTrue(report.features.customTip, build)
+            XCTAssertEqual(report.installedBuildTargets, ["revoke", "revoke-tip", "update", "runtime-tip"])
+            XCTAssertTrue(try XCTUnwrap(report.catalog.first { $0.build == build }).runtimeTipSupported)
+        }
+    }
+
     func testVersionsReportForUnsupportedBuild() throws {
         let configs = try loadPatchConfigs()
         let report = VersionsReport(appInfo: appInfo(buildVersion: "999999"), configs: configs)

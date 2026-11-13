@@ -6,7 +6,7 @@ import Foundation
 
 struct RecallLogSettings: Codable, Equatable {
     static let preferenceKey = "WeChatAntiRecall_RecallLog"
-    static let runtimeMarker = "WeChatAntiRecallRecallLog:1"
+    static let runtimeMarker = "WeChatAntiRecallRecallLog:2"
     var enabled = false
 }
 

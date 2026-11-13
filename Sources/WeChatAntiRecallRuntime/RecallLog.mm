@@ -22,7 +22,7 @@
 // ~/Library/Containers/<bundle>/Data/Library/Application Support/WeChatAntiRecall/.
 namespace {
 
-constexpr const char *runtimeVersion = "WeChatAntiRecallRecallLog:1";
+constexpr const char *runtimeVersion = "WeChatAntiRecallRecallLog:2";
 constexpr const char *settingsKey = "WeChatAntiRecall_RecallLog";
 constexpr const char *logFileName = "recall-log.jsonl";
 constexpr const char *rotatedLogFileName = "recall-log.1.jsonl";

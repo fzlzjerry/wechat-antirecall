@@ -263,6 +263,26 @@ final class InlineHookEngineTests: XCTestCase {
         XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&messageBytes, 0x4cbc3ac), 0xa52bff8)
     }
 
+    func testEncoderMatchesRecorded270352StaticPatches() throws {
+        var bytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x4e7d4dc, 0xa68bff0, &bytes), 1)
+        XCTAssertEqual(bytes.map { String(format: "%02X", $0) }.joined(), "70C002D010FA47F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x4e7d4dc), 0xa68bff0)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x4e1a094, 0xa68bff8, &bytes), 1)
+        XCTAssertEqual(bytes.map { String(format: "%02X", $0) }.joined(), "90C302B010FE47F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x4e1a094), 0xa68bff8)
+    }
+
+    func testEncoderMatchesRecorded270390StaticPatches() throws {
+        var bytes = [UInt8](repeating: 0, count: 12)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x4613ec4, 0x9e2fff0, &bytes), 1)
+        XCTAssertEqual(bytes.map { String(format: "%02X", $0) }.joined(), "F0C0029010FA47F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x4613ec4), 0x9e2fff0)
+        XCTAssertEqual(wechat_antirecall_encode_entry_stub(0x45c0b2c, 0x9e2fff8, &bytes), 1)
+        XCTAssertEqual(bytes.map { String(format: "%02X", $0) }.joined(), "70C302F010FE47F900021FD6")
+        XCTAssertEqual(wechat_antirecall_decode_entry_stub_slot(&bytes, 0x45c0b2c), 0x9e2fff8)
+    }
+
     /// Non-stub bytes must not decode as a slot (guards against false positives that
     /// would make the runtime treat an unpatched entry as installed).
     func testDecodeRejectsNonStubBytes() throws {

@@ -5,7 +5,7 @@ import Foundation
 
 struct KeywordAlertSettings: Codable, Equatable {
     static let preferenceKey = "WeChatAntiRecall_KeywordAlert"
-    static let runtimeMarker = "WeChatAntiRecallKeywordAlert:1"
+    static let runtimeMarker = "WeChatAntiRecallKeywordAlert:2"
     static let maximumKeywords = 20
     static let maximumKeywordLength = 32
     // The alert reads the same verified Message layout as the red-packet feature, so it is

@@ -21,7 +21,7 @@
 // message text is never written anywhere except the notification the user asked for.
 namespace {
 
-constexpr const char *runtimeVersion = "WeChatAntiRecallKeywordAlert:1";
+constexpr const char *runtimeVersion = "WeChatAntiRecallKeywordAlert:2";
 constexpr const char *settingsKey = "WeChatAntiRecall_KeywordAlert";
 constexpr size_t maximumKeywords = 20;
 constexpr NSUInteger maximumKeywordLength = 32;

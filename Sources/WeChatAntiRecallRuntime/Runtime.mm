@@ -34,7 +34,7 @@ constexpr size_t revokeContentCacheMaximumCount = 512;
 constexpr size_t revokeContentPreviewMaximumBytes = 240;
 constexpr size_t arm64StubLength = 16;
 
-// Call-site analysis through build 270135 confirms this function takes exactly
+// Call-site analysis through build 270390 confirms this function takes exactly
 // three arguments. The second argument is the raw XML and the wrapper has already
 // copied it into the build-specific handlerOutput replaceMsg field.
 using ParseRevokeXML = bool (*)(void *, std::string *, void *);
@@ -263,6 +263,13 @@ constexpr InlineRevokeHookConfig inlineRevokeHookConfigs[] = {
     // +0x1C8/+0x1D0. SLOT 0xA52BFF0 lies in the __DATA zero-fill tail after
     // __common ends at 0xA52BEB8.
     {"270135", 0x4d1f8d8, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4d1f8e4, 0x1c8, 0x1d0},
+    // 270352 (4.2.0.16): parser and fields independently verified against the
+    // shipped arm64 slice. SLOT 0xA68BFF0 is beyond __common (0xA68A828).
+    {"270352", 0x4e7d4dc, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4e7d4e8, 0x1c8, 0x1d0},
+    // 270390 (4.2.0.54): the recompiled parser is 0x1164 bytes. The guard
+    // moved to +0x278 and newmsgid store to +0xA40; object fields did not move.
+    // SLOT 0x9E2FFF0 lies beyond __common (0x9E2D100).
+    {"270390", 0x4613ec4, {0xA9BC5FF8, 0xA90157F6, 0xA9024FF4}, 0x4613ed0, 0x1c8, 0x1d0},
 };
 
 constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
@@ -496,6 +503,28 @@ constexpr InlineMessageCaptureHookConfig inlineMessageCaptureHookConfigs[] = {
         0x4cbc3ac,
         {0x39496008, 0x7100051F, 0x7A400820},
         0x4cbc3b8,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 270352: network constructor 0x4E18D2C writes serverId +0xF8,
+    // content +0x130 and creation time +0x114 before call 0x4E191E0.
+    {
+        "270352",
+        0x4e1a094,
+        {0x39496008, 0x7100051F, 0x7A400820},
+        0x4e1a0a0,
+        0x0f8,
+        0x00c,
+        0x130,
+    },
+    // 270390: constructor 0x45BF724 writes the same fields before call
+    // 0x45BFBA4. The finalizer is now 0x118 bytes; its replayed prefix is intact.
+    {
+        "270390",
+        0x45c0b2c,
+        {0x39496008, 0x7100051F, 0x7A400820},
+        0x45c0b38,
         0x0f8,
         0x00c,
         0x130,

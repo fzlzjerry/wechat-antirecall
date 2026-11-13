@@ -106,8 +106,8 @@ final class RedPacketTests: XCTestCase {
     func testRuntimeMarkerMatchesRuntimeExport() {
         XCTAssertEqual(String(cString: wechat_antirecall_red_packet_runtime_version()),
                        RedPacketSettings.runtimeMarker)
-        XCTAssertEqual(RedPacketSettings.runtimeMarker, "WeChatAntiRecallRedPacket:9",
-                       "270135 needs the new native address table; older runtimes must require an update")
+        XCTAssertEqual(RedPacketSettings.runtimeMarker, "WeChatAntiRecallRedPacket:10",
+                       "WeChat 4.2 needs the new native address tables; older runtimes must require an update")
     }
 
     func testBuild270102RedPacketSupportRequiresRecallMessageHook() {
@@ -136,6 +136,19 @@ final class RedPacketTests: XCTestCase {
         XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains("270135"))
         XCTAssertFalse(RedPacketSettings.supportedBuilds.contains("270136"),
                        "Unverified neighboring builds must not inherit native offsets")
+    }
+
+    func testWeChat42RequiresNewNativeProfilesAndMessageHooks() {
+        for build in ["270352", "270390"] {
+            XCTAssertTrue(RedPacketSettings.supportedBuilds.contains(build))
+            XCTAssertTrue(RuntimeTipInstaller.supportedBuildVersions.contains(build))
+            XCTAssertTrue(KeywordAlertSettings.supportedBuilds.contains(build))
+        }
+        for build in ["270351", "270353", "270389", "270391"] {
+            XCTAssertFalse(RedPacketSettings.supportedBuilds.contains(build),
+                           "Unverified neighboring builds must not inherit native offsets")
+            XCTAssertFalse(RuntimeTipInstaller.supportedBuildVersions.contains(build))
+        }
     }
 
     func testPreferenceRoundTripPreservesWeChatSettings() throws {

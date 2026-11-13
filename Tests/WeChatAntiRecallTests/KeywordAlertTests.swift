@@ -40,7 +40,7 @@ final class KeywordAlertTests: XCTestCase {
 
     func testRuntimeMarkerMatchesRuntimeExport() {
         XCTAssertEqual(String(cString: wechat_antirecall_keyword_alert_runtime_version()), KeywordAlertSettings.runtimeMarker)
-        XCTAssertEqual(KeywordAlertSettings.runtimeMarker, "WeChatAntiRecallKeywordAlert:1")
+        XCTAssertEqual(KeywordAlertSettings.runtimeMarker, "WeChatAntiRecallKeywordAlert:2")
     }
 
     func testRuntimeReadsValidSettings() throws {
