@@ -535,6 +535,12 @@ ParseRevokeXML originalParseRevokeXML = nullptr;
 FinalizeMessage originalFinalizeMessage = nullptr;
 const RevokeHookConfig *activeRevokeHookConfig = nullptr;
 const InlineMessageCaptureHookConfig *activeMessageCaptureHookConfig = nullptr;
+// Resolved load geometry of wechat.dylib, published for the debug backtrace probe:
+// packed-image dispatch tables only exist at runtime, so the callers above the
+// revoke parser are located by walking frames instead of static cross-references.
+uintptr_t activeWeChatDylibSlide = 0;
+uintptr_t activeWeChatDylibStart = 0;
+uintptr_t activeWeChatDylibEnd = 0;
 // Backing storage for the offsets used by hookedParseRevokeXML when the active hook
 // is an inline hook (the InlineRevokeHookConfig builds a compatible RevokeHookConfig).
 RevokeHookConfig activeInlineRevokeHookConfig = {nullptr, 0, 0, 0};
@@ -1325,6 +1331,31 @@ void replaceContentPlaceholder(std::string &rendered, const std::string &content
     replaceAll(rendered, "{content}", "");
 }
 
+// True when the revoke XML targets a group chat. Chatroom messages carry a
+// "wxid_xxx:\n" sender prefix in their raw content, and that prefix leaks into
+// the {content} preview captured from it. Only a <session> ending in @chatroom
+// gets the prefix stripped — a 1:1 body may legitimately contain "x:\n" itself.
+bool revokeSessionIsChatroom(const std::string *xml) {
+    if (xml == nullptr || xml->empty()) {
+        return false;
+    }
+
+    return hasSuffix(xmlTagValue(*xml, "session"), "@chatroom");
+}
+
+void stripChatroomSenderPrefix(const std::string *xml, std::string &contentPreview) {
+    if (contentPreview.empty() || !revokeSessionIsChatroom(xml)) {
+        return;
+    }
+
+    const auto position = contentPreview.find(":\n");
+    if (position == std::string::npos || position > 64) {
+        return;
+    }
+
+    contentPreview.erase(0, position + 2);
+}
+
 std::string renderRevokeTip(
     const std::string &originalTip,
     const std::string &configuredPhrase,
@@ -1622,6 +1653,37 @@ NSString *nsStringFromStdString(const std::string &value) {
     return string == nil ? @"<non-utf8>" : string;
 }
 
+// Debug-only: walk the arm64 frame-pointer chain from inside the revoke hook and
+// log every return address that lands inside wechat.dylib as an unslid offset.
+// The wrapper/dispatcher above parseRevokeXML has no static cross-references in
+// the packed image, so this is the only way to see who calls into the revoke path.
+void logRevokeBacktraceProbe() {
+    if (activeWeChatDylibSlide == 0 || activeWeChatDylibStart == 0) {
+        return;
+    }
+
+    @autoreleasepool {
+        uint64_t framePointer = 0;
+        __asm__ volatile("mov %0, x29" : "=r"(framePointer));
+        for (int depth = 0; depth < 24 && framePointer != 0; depth += 1) {
+            const auto *frame = reinterpret_cast<const uint64_t *>(framePointer);
+            if (!isAddressRangeReadable(frame, 2 * sizeof(uint64_t))) {
+                break;
+            }
+            const uint64_t returnAddress = frame[1];
+            if (returnAddress >= activeWeChatDylibStart && returnAddress < activeWeChatDylibEnd) {
+                os_log(
+                    OS_LOG_DEFAULT,
+                    "[WeChatAntiRecall] backtrace frame=%d lr=+0x%llx",
+                    depth,
+                    static_cast<unsigned long long>(returnAddress - activeWeChatDylibSlide)
+                );
+            }
+            framePointer = frame[0];
+        }
+    }
+}
+
 void logRevokeProbe(uint64_t newMsgId, const std::string &replaceMsg, const std::string *xml) {
     @autoreleasepool {
         // The probe is opt-in (debugProbeEnabled) and exists precisely to show this data
@@ -1729,6 +1791,17 @@ char *copyNSString(NSString *value) {
     return copyCString([value UTF8String]);
 }
 
+// Experiment toggle for the group-tip investigation: restore the real newmsgid
+// (instead of zeroing it) so WeChat's revoke handler can locate the original
+// message. The group tip render is gated on that lookup succeeding, so this
+// trades interception for a visible tip — diagnostic only, never a default.
+bool restoreNewMsgIdExperimentEnabled() {
+    @autoreleasepool {
+        id value = [[NSUserDefaults standardUserDefaults] objectForKey:@"WeChatAntiRecall_ExperimentRestoreId"];
+        return [value isKindOfClass:[NSNumber class]] && [(NSNumber *)value boolValue];
+    }
+}
+
 bool hookedParseRevokeXML(void *message, std::string *xml, void *flag) {
     if (originalParseRevokeXML == nullptr) {
         return false;
@@ -1770,6 +1843,7 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag) {
         if (debugProbeEnabled()) {
             logRevokeProbe(originalNewMsgId, originalReplaceMsg, xml);
             logRevokeMessageStructProbe(message, config);
+            logRevokeBacktraceProbe();
         }
 
         if (selfRecall) {
@@ -1788,13 +1862,22 @@ bool hookedParseRevokeXML(void *message, std::string *xml, void *flag) {
         revokeNewMsgIdFromXML(xml, contentKey);
         std::string contentPreview;
         const bool hasContentPreview = lookupRevokeContentPreview(contentKey, contentPreview);
+        if (hasContentPreview) {
+            stripChatroomSenderPrefix(xml, contentPreview);
+        }
 
         // Opt-in recall log. Best effort and independent of the tip rewrite below.
         recall_log::record(*xml, originalReplaceMsg, hasContentPreview ? &contentPreview : nullptr);
 
         const char *phrase = [configuredPhrase() UTF8String];
         if (phrase != nullptr) {
-            *newMsgId = 0;
+            uint64_t realNewMsgId = 0;
+            revokeNewMsgIdFromXML(xml, realNewMsgId);
+            if (restoreNewMsgIdExperimentEnabled() && realNewMsgId != 0) {
+                *newMsgId = realNewMsgId;
+            } else {
+                *newMsgId = 0;
+            }
             const auto timeText = stableRevokeTimeText(originalNewMsgId, xml, originalReplaceMsg, currentTimeText());
             replaceMsg->assign(renderRevokeTip(originalReplaceMsg, phrase, timeText, contentPreview));
         }
@@ -2159,6 +2242,10 @@ void wechatImageAdded(const mach_header *header, intptr_t slide) {
         return;
     }
 
+    activeWeChatDylibSlide = static_cast<uintptr_t>(slide);
+    activeWeChatDylibStart = start;
+    activeWeChatDylibEnd = start + size;
+
     @autoreleasepool {
         installRevokeTipHook({static_cast<uintptr_t>(slide), start, size});
     }
@@ -2203,7 +2290,8 @@ char *wechat_antirecall_render_revoke_tip_for_event_with_content_copy(
     const std::string phrase = configuredPhrase == nullptr ? "" : configuredPhrase;
     const std::string xmlString = xml == nullptr ? "" : xml;
     const std::string fallback = fallbackTime == nullptr ? currentTimeText() : fallbackTime;
-    const std::string content = contentPreview == nullptr ? "" : contentPreview;
+    std::string content = contentPreview == nullptr ? "" : contentPreview;
+    stripChatroomSenderPrefix(xml == nullptr ? nullptr : &xmlString, content);
     const auto timeText = stableRevokeTimeText(newMsgId, xml == nullptr ? nullptr : &xmlString, original, fallback);
     const auto rendered = renderRevokeTip(original, phrase, timeText, content);
 

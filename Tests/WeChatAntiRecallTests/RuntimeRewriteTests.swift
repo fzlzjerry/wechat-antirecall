@@ -69,6 +69,61 @@ final class RuntimeRewriteTests: XCTestCase {
         )
     }
 
+    func testStripsChatroomSenderPrefixFromContentPreview() throws {
+        let phrase = "已拦截 {from} 撤回：{content}"
+        let xml = "<sysmsg type=\"revokemsg\"><revokemsg><session>58397013527@chatroom</session>"
+            + "<newmsgid>987654321012</newmsgid>"
+            + "<replacemsg><![CDATA[\"张三\" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>"
+
+        let rendered = try renderEventWithContent(
+            original: "\"张三\" 撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 987654321012,
+            xml: xml,
+            fallbackTime: "00:42",
+            content: "wxid_kz3m4mtikben21:\nK"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 张三 撤回：K")
+    }
+
+    func testKeepsContentPreviewIntactOutsideChatroom() throws {
+        let phrase = "已拦截 {from} 撤回：{content}"
+        let xml = "<sysmsg type=\"revokemsg\"><revokemsg><session>wxid_friend</session>"
+            + "<newmsgid>987654321012</newmsgid>"
+            + "<replacemsg><![CDATA[张三 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>"
+
+        // A 1:1 body may legitimately contain "x:\n" itself, so nothing is stripped there.
+        let rendered = try renderEventWithContent(
+            original: "张三 撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 987654321012,
+            xml: xml,
+            fallbackTime: "00:42",
+            content: "步骤如下:\n1. 打开设置"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 张三 撤回：步骤如下:\n1. 打开设置")
+    }
+
+    func testKeepsMediaPlaceholderWithoutSeparator() throws {
+        let phrase = "已拦截 {from} 撤回：{content}"
+        let xml = "<sysmsg type=\"revokemsg\"><revokemsg><session>58397013527@chatroom</session>"
+            + "<newmsgid>987654321012</newmsgid>"
+            + "<replacemsg><![CDATA[\"张三\" 撤回了一条消息]]></replacemsg></revokemsg></sysmsg>"
+
+        let rendered = try renderEventWithContent(
+            original: "\"张三\" 撤回了一条消息",
+            phrase: phrase,
+            newMsgId: 987654321012,
+            xml: xml,
+            fallbackTime: "00:42",
+            content: "[图片]"
+        )
+
+        XCTAssertEqual(rendered, "已拦截 张三 撤回：[图片]")
+    }
+
     func testRenderingConfiguredPhraseIsIdempotent() throws {
         let phrase = "已拦截 {from} 撤回的一条消息"
         let rendered = try render(original: "Benjamin撤回了一条消息", phrase: phrase)

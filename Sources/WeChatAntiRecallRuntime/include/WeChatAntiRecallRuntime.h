@@ -69,6 +69,18 @@ uintptr_t wechat_antirecall_resolve_parse_revoke_xml_hook_slot(
 int wechat_antirecall_is_address_range_readable(uintptr_t address, uintptr_t length);
 void wechat_antirecall_free(void *pointer);
 
+// Key export (KeyExport.mm). The runtime scans its own heap for WeChat 4.x SQLCipher
+// raw keys (x'<64 hex key><32 hex salt>') and writes a snapshot the CLI can hand to
+// local database readers, without task_for_pid or re-signing. Callers own the copy
+// buffers returned below (free with wechat_antirecall_free).
+const char *wechat_antirecall_key_export_runtime_version(void);
+int wechat_antirecall_key_export_enabled_for_plist(const char *plistPath);
+char *wechat_antirecall_key_export_scan_buffer_for_test(const uint8_t *buffer, size_t length);
+char *wechat_antirecall_key_export_scan_self_for_test(void);
+int wechat_antirecall_key_export_write_for_test(const char *directory, const char *json);
+int wechat_antirecall_key_export_scan_and_write_for_test(const char *directory);
+int wechat_antirecall_key_export_reset_throttle_for_test(void);
+
 // Inline-hook engine (used for builds whose parseRevokeXML has no WeChat dispatch
 // stub, e.g. 268849). Exposed for unit testing without a running WeChat.
 
